@@ -1,0 +1,6 @@
+# Generated artifacts, ignored so a stage folder can be copied and committed on its own.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+runs/
