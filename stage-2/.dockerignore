@@ -1,0 +1,9 @@
+# The image needs the service, not its tests, caches or notes.
+tests/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+RUN.md
+.dockerignore
+.gitignore
