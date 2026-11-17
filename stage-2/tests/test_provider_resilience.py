@@ -45,8 +45,8 @@ def test_throttled_first_attempts_still_build_the_same_dossier(world):
     body = build(world)
     assert body["state"] == "ready"
     assert {name: field["value"] for name, field in body["fields"].items()} == EXPECTED
-    for field in body["fields"].values():
-        assert field["status"] == "known" and field["citations"]
+    for name, field in body["fields"].items():
+        assert field["status"] in ("known", "contested") and field["citations"], name
     refused = [entry for entry in fakeweb.LOG if entry["status"] == 429]
     assert refused and all(entry["cost"] == 0 for entry in refused)
     assert body["spent_units"] == fakeweb.spent() > 0
@@ -88,7 +88,7 @@ def test_a_timeout_costs_its_units_and_its_retries_stay_within_the_cap(world):
     assert body["state"] == "ready"          # the searches and the research run answered
     extract_attempts = [entry for entry in fakeweb.LOG if entry["method"] == "extract"]
     assert len(extract_attempts) > 1         # it was retried, not surrendered after one try
-    assert all(entry["cost"] == providers.EXTRACT_COST for entry in extract_attempts)
+    assert all(entry["cost"] == providers.RENDER_COST for entry in extract_attempts)
     assert body["spent_units"] == fakeweb.spent()
     assert 0 < body["spent_units"] <= 80
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import errors, evidence, passwords
+from . import candidates as candidates_module
+from . import pages as pages_module
 from .domain import InvalidDomain, normalised_or_raise
 
 TIME = re.compile(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})")
@@ -47,8 +49,8 @@ def format_time(moment: datetime) -> str:
 
 
 def empty_fields() -> dict:
-    """All six fields of a dossier, each unknown (§4)."""
-    return {name: {"value": None, "status": "unknown", "citations": []}
+    """All six fields of a dossier, each unknown and without candidates (§4, §2)."""
+    return {name: {"value": None, "status": "unknown", "citations": [], "candidates": []}
             for name in evidence.FIELDS}
 
 
@@ -532,17 +534,72 @@ def _validated_dossiers(raw) -> dict[str, Dossier]:
             raise FixtureError(errors.validation("spent_units must be a non-negative integer"))
         if not isinstance(fields, dict) or set(fields) != set(evidence.FIELDS):
             raise FixtureError(errors.validation("a state dossier needs all six fields"))
-        for name, value in fields.items():
-            if not isinstance(value, dict) or not isinstance(value.get("citations"), list):
-                raise FixtureError(errors.validation(f"a state field {name} is malformed"))
+        migrated = {name: migrated_field(name, value, researched_at)
+                    for name, value in fields.items()}
         dossier = Dossier(dossier_id=dossier_id, domain=domain,
                           state="failed" if state == "building" else state,
-                          fields=copy.deepcopy(fields), researched_at=researched_at,
+                          fields=migrated, researched_at=researched_at,
                           spent_units=spent)
         if dossier_id in {other.dossier_id for other in dossiers.values()}:
             raise FixtureError(errors.validation("two state dossiers share an id"))
         dossiers[domain] = dossier
     return dossiers
+
+
+def migrated_field(name: str, value, researched_at) -> dict:
+    """One imported field, as a stage-2 field with candidates derived by the selection rule.
+
+    A stage-2 export carries candidates already; they are re-ranked so that the
+    value, status and citations always follow from them. A stage-1 export carries
+    the value and the citations that supported it -- one per page whose served text
+    did -- so each citation becomes one candidate, with the imported authority of
+    `aggregator` and the dossier's `researched_at` as its retrieval time.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("citations", []), list):
+        raise FixtureError(errors.validation(f"a state field {name} is malformed"))
+    imported = value.get("candidates")
+    if isinstance(imported, list) and imported:
+        candidates = [_validated_candidate(name, candidate) for candidate in imported]
+    else:
+        candidates = candidates_module.candidates_from_citations(
+            value.get("value"), value.get("citations") or [], researched_at)
+    return candidates_module.field(candidates)
+
+
+def _validated_candidate(name: str, candidate) -> dict:
+    """One imported candidate, checked against the shape §2 gives it."""
+    if not isinstance(candidate, dict):
+        raise FixtureError(errors.validation(f"a state candidate of {name} is malformed"))
+    for key in ("url", "excerpt", "provider"):
+        if not isinstance(candidate.get(key), str) or not candidate.get(key):
+            raise FixtureError(
+                errors.validation(f"a state candidate of {name} needs a string {key}"))
+    kind = candidate.get("kind")
+    if kind is not None and kind not in pages_module.KINDS:
+        raise FixtureError(errors.validation(f"a state candidate of {name} has a bad kind"))
+    published = candidate.get("published_at")
+    if published is not None:
+        if not isinstance(published, str):
+            raise FixtureError(
+                errors.validation(f"a state candidate of {name} has a bad published_at"))
+        try:
+            parse_time(published)
+        except ValueError:
+            raise FixtureError(
+                errors.validation(f"a state candidate of {name} has a bad published_at")) \
+                from None
+    retrieved = candidate.get("retrieved_at")
+    if retrieved is not None:
+        try:
+            parse_time(retrieved)
+        except ValueError:
+            raise FixtureError(
+                errors.validation(f"a state candidate of {name} has a bad retrieved_at")) \
+                from None
+    return {"value": candidate.get("value"), "url": candidate["url"],
+            "excerpt": candidate["excerpt"], "provider": candidate["provider"],
+            "kind": kind if isinstance(kind, str) else None,
+            "published_at": published, "retrieved_at": retrieved, "selected": False}
 
 
 def _validated_responses(raw) -> dict[tuple[str, str], dict[tuple[str, str], StoredResponse]]:

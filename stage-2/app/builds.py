@@ -1,30 +1,31 @@
-"""One build: the calls it makes, what it spends, and the six fields it decides.
+"""One build: the calls it makes, what it spends, and the candidates it keeps (§2).
 
-A build gathers evidence -- the full text of every page a search returns, and the
-claims a nimble research run answers with -- and settles each field from the
-sentences Appendix A proves. It never makes a provider call for a read, never
-spends past §9's 80 units, and records nothing after a reset or import.
+A build gathers browser-visible page text -- a rendered extract through Nimble,
+which is the text a reader sees once the page has loaded -- plus the claims a
+Nimble research run answers with. Every value a page's text supports becomes a
+candidate; the selection rule then picks one per field.
+
+It never makes a provider call for a read, never spends past §9's 80 units, and
+records nothing after a reset or import.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import threading
 
-from . import evidence, providers
+from . import candidates, evidence, pages, providers
 from .domain import company_name
 
 BUDGET_UNITS = 80
-#: Pages that are not searchable surface only through a research citation's URL.
-EXTRACT_LIMIT = 34
-#: Extract slots kept for pages only a research citation names, so a full set of search
-#: results cannot crowd them out.
-RESEARCH_RESERVE = 6
 WORKERS = 8
-MAX_CITATIONS = 6
+#: Searches one build makes: the first is exactly the domain, the rest name the company.
+#: Seven reach essentially every page the corpus serves (a search returns at most ten),
+#: and leave the budget for the rendered extracts that carry the values.
+QUERIES = 7
+
 
 def queries(domain: str) -> list[str]:
-    """The searches one build makes: the first is exactly the domain, the rest name the
-    company with other queries (searches return at most ten results each)."""
+    """The searches one build makes: the first is exactly the domain."""
     name = company_name(domain)
     return [
         domain,
@@ -34,10 +35,7 @@ def queries(domain: str) -> list[str]:
         f"{domain} funding raised investment total",
         f"{domain} about contact",
         f"{domain} awards recognition community",
-        f"{name} news press release",
-        f"{name} products services customers",
-        f"{domain} solutions platform technology",
-    ]
+    ][:QUERIES]
 
 
 def _claimed(field: str, claimed, excerpt: str, domain: str):
@@ -57,32 +55,6 @@ def _claimed(field: str, claimed, excerpt: str, domain: str):
     return supported
 
 
-def decide(items: list[tuple[str, object, str, str]]) -> dict:
-    """The six fields, from every (field, value, url, excerpt) the evidence supports.
-
-    When the evidence supports several values for a field the field holds the one
-    the most excerpts support, and cites only the excerpts that support it (§4).
-    """
-    grouped: dict[str, dict[object, list[dict]]] = {name: {} for name in evidence.FIELDS}
-    order: dict[str, dict[object, int]] = {name: {} for name in evidence.FIELDS}
-    for field, value, url, excerpt in items:
-        citations = grouped[field].setdefault(value, [])
-        order[field].setdefault(value, len(order[field]))
-        citation = {"url": url, "excerpt": excerpt, "provider": providers.PROVIDER}
-        if citation not in citations:
-            citations.append(citation)
-    fields = {}
-    for name in evidence.FIELDS:
-        values = grouped[name]
-        if not values:
-            fields[name] = {"value": None, "status": "unknown", "citations": []}
-            continue
-        best = min(values, key=lambda value: (-len(values[value]), order[name][value]))
-        citations = values[best][:MAX_CITATIONS]
-        fields[name] = {"value": best, "status": "known", "citations": citations}
-    return fields
-
-
 class Builder:
     """Starts one background build per request that begins one."""
 
@@ -95,7 +67,7 @@ class Builder:
                          name=f"build-{dossier.domain}", daemon=True).start()
 
     def _run(self, dossier, generation: int, when: str) -> None:
-        """Gather, decide, and record the outcome -- unless a reset superseded this build."""
+        """Gather, select, and record the outcome -- unless a reset superseded this build."""
         try:
             self._run_safely(dossier, generation, when)
         except Exception:  # noqa: BLE001 - a build must always leave a terminal state
@@ -110,27 +82,18 @@ class Builder:
         budget = providers.Budget(
             BUDGET_UNITS, lambda units: self.store.add_spend(dossier, generation, units))
         calls = providers.Calls(budget)
-        pages: dict[str, str] = {}
-        urls: list[str] = []
+        page_text: dict[str, str] = {}
+        found: list[str] = []
+        seen: set[str] = set()
         claims: list[tuple[str, object, str, str]] = []
-        found: set[str] = set()
-        extracted: set[str] = set()
-        counter = threading.Lock()
 
-        def remember(url: str, limit: int) -> bool:
-            """Keep this URL for extraction; False once the build has left its extract budget."""
-            with counter:
-                if url in extracted or len(extracted) >= limit:
-                    return False
-                extracted.add(url)
-                return True
-
-        def gather(url: str, limit: int = EXTRACT_LIMIT) -> None:
-            if not self.store.still_current(dossier, generation) or not remember(url, limit):
+        def gather(url: str) -> None:
+            """Read one page as a browser shows it, when the budget still allows it."""
+            if not self.store.still_current(dossier, generation):
                 return
-            text = calls.extract(url)
+            text = calls.extract(url, render=True)
             if text is not None:
-                pages[url] = text
+                page_text[url] = text
 
         def search(query: str):
             """One search, skipped when a reset or import has already superseded this build."""
@@ -140,46 +103,60 @@ class Builder:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS + 1) as pool:
             research = pool.submit(calls.research, providers.research_query(domain))
-            # The searches run beside each other: ten sequential calls would take ten
-            # seconds of provider latency, and §8 gives a fast build ten in total.
             pending = [pool.submit(search, query) for query in queries(domain)]
             for future in pending:
                 if not self.store.still_current(dossier, generation):
                     return
-                results = future.result()
-                if not results:
-                    continue
-                for result in results:
+                for result in future.result() or []:
                     url = result.get("url")
-                    if isinstance(url, str) and url and url not in found:
-                        found.add(url)
-                        urls.append(url)
-            # Own pages first, then the rest, so a cap on extracts costs the least.
-            for url in sorted(urls, key=lambda url: (not url.startswith("https://" + domain),
-                                                     url)):
-                if self.store.still_current(dossier, generation):
-                    pool.submit(gather, url, EXTRACT_LIMIT - RESEARCH_RESERVE)
+                    if isinstance(url, str) and url and url not in seen:
+                        seen.add(url)
+                        found.append(url)
             try:
                 answer = research.result()
             except Exception:  # noqa: BLE001 - a research failure is a failed call
                 answer = None
+            cited: list[str] = []
             if answer is not None and self.store.still_current(dossier, generation):
                 structured, citations = answer
                 for citation in citations:
+                    if not citation.url or citation.url in cited:
+                        continue
+                    cited.append(citation.url)
                     field = (citation.field or "").removeprefix("$.")
                     if field not in evidence.FIELDS:
                         continue
                     value = _claimed(field, structured.get(field), citation.snippet, domain)
-                    if value is not None and citation.url:
+                    if value is not None:
                         claims.append((field, value, citation.url,
                                        " ".join(citation.snippet.split())))
-                    if citation.url:
-                        pool.submit(gather, citation.url)
+            # A page only a citation names first: it is usually the filing that no search
+            # returns. Then the company's own pages, then the rest.
+            order = cited + sorted(
+                (url for url in found if url not in cited),
+                key=lambda url: (pages.host_of(url) != domain, url))
+            for url in order:
+                pool.submit(gather, url)
 
-        items: list[tuple[str, object, str, str]] = []
-        for url in sorted(pages):
-            for field, pairs in evidence.page_values(pages[url], domain).items():
+        rows = {name: [] for name in evidence.FIELDS}
+        for url in sorted(page_text):
+            text = page_text[url]
+            meta = pages.metadata(text, url, domain)
+            for name, pairs in evidence.page_values(text, domain).items():
                 for value, excerpt in pairs:
-                    items.append((field, value, url, excerpt))
-        items.extend(claims)
-        self.store.finish_build(dossier, generation, calls.succeeded, decide(items), when)
+                    rows[name].append({"value": value, "url": url, "excerpt": excerpt,
+                                       "provider": providers.PROVIDER,
+                                       "kind": meta["kind"],
+                                       "published_at": meta["published_at"],
+                                       "retrieved_at": when, "selected": False})
+        for name, value, url, excerpt in claims:
+            if url in page_text:
+                continue  # the page's own text already carries every value it supports
+            rows[name].append({"value": value, "url": url, "excerpt": excerpt,
+                               "provider": providers.PROVIDER,
+                               "kind": "own" if pages.host_of(url) == domain
+                               else "aggregator",
+                               "published_at": None, "retrieved_at": when,
+                               "selected": False})
+        fields = {name: candidates.field(rows[name]) for name in evidence.FIELDS}
+        self.store.finish_build(dossier, generation, calls.succeeded, fields, when)

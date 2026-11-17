@@ -223,8 +223,9 @@ def test_a_built_dossier_holds_the_six_supported_fields(world):
     assert values == {"legal_name": "Acme Robotics, Inc.", "hq_city": "Lisbon",
                       "ceo": "Dana Ruiz", "founded_year": 2014,
                       "headcount_range": "51-200", "funding_total": 12_000_000}
-    for field in body["fields"].values():
-        assert field["status"] == "known" and field["citations"]
+    for name, field in body["fields"].items():
+        assert field["status"] in ("known", "contested") and field["citations"], name
+        assert field["candidates"], name
         for citation in field["citations"]:
             assert citation["provider"] == "nimble" and citation["url"]
             assert 1 <= len(citation["excerpt"]) <= 500
@@ -314,7 +315,8 @@ def test_a_failed_build_spends_nothing_and_keeps_fields_unknown(world):
     assert body["state"] == "failed" and body["researched_at"] is None
     assert body["spent_units"] == 0
     for name in FIELDS:
-        assert body["fields"][name] == {"value": None, "status": "unknown", "citations": []}
+        assert body["fields"][name] == {"value": None, "status": "unknown",
+                                        "citations": [], "candidates": []}
 
 
 def test_a_failed_refresh_keeps_the_last_ready_fields(world):
@@ -547,7 +549,7 @@ def test_refresh_while_building_starts_no_second_build(world):
     assert first.json() == again.json()
     body = wait_ready(world, ACME)
     assert body["state"] == "ready"
-    assert sum(1 for entry in fakeweb.LOG if entry["method"] == "search") == 10
+    assert sum(1 for entry in fakeweb.LOG if entry["method"] == "search") == 7
 
 
 def test_refresh_of_an_unknown_domain_is_404(world):

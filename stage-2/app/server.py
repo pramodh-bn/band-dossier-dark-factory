@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import errors, store as state
+from . import ui
 from .builds import Builder
 from .domain import InvalidDomain, normalised_or_raise
 
@@ -73,6 +74,27 @@ def _paging_value(query: dict, name: str, default: int, minimum: int,
     return value
 
 
+class Html:
+    """A response body that is the browser document rather than JSON."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def wants_html(headers) -> bool:
+    """Whether the caller asked for the browser document (§2, Screens)."""
+    return "text/html" in (headers.get("Accept") or "").lower()
+
+
+def browser_page(path: str) -> str | None:
+    """The document a browser route serves, or None for an API route."""
+    if path in ("/", "/signup", "/login", "/contested"):
+        return ui.page()
+    if path.startswith("/dossiers/"):
+        return ui.page()
+    return None
+
+
 class Application:
     """The service's state and the build runner, and every route over them."""
 
@@ -86,6 +108,10 @@ class Application:
         """Answer one request as (status, body); raise :class:`ApiError` for a failure."""
         when = self.store.stamp()
         path = path.rstrip("/") or "/"
+        if method == "GET" and wants_html(headers):
+            document = browser_page(path)
+            if document is not None:
+                return 200, Html(document)
         if path == "/health" and method == "GET":
             return 200, {"status": "ok"}
         if path == "/_test/reset" and method == "POST":
@@ -245,7 +271,16 @@ class Handler(BaseHTTPRequestHandler):
         self._reply(status, payload)
 
     def _reply(self, status: int, payload) -> None:
-        """Write a JSON answer, or no body at all for 204."""
+        """Write a JSON answer, the browser document, or no body at all for 204."""
+        if isinstance(payload, Html):
+            data = payload.text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+            return
         data = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         if payload is not None:

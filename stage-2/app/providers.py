@@ -15,6 +15,8 @@ import time
 PROVIDER = "nimble"
 SEARCH_COST = {"lite": 1, "fast": 5, "deep": 15}
 EXTRACT_COST = 1
+#: An extract through nimble that loads the page in a browser costs 3 (§2, Web access).
+RENDER_COST = 3
 RESEARCH_COST = 25
 MAX_RESULTS = 10
 #: A search may wait 30 s before the service gives up on it (live providers are slow).
@@ -184,11 +186,11 @@ class Calls:
         return router().search(query, provider=PROVIDER, max_results=MAX_RESULTS,
                                search_depth=depth, data_apis=False, timeout=CALL_TIMEOUT)
 
-    def _invoke_extract(self, url: str):
-        """The provider's extract answer for `url`; §9: an extract through nimble does not
-        set render."""
+    def _invoke_extract(self, url: str, render: bool = False):
+        """The provider's extract answer for `url`, optionally the text a browser shows."""
+        options = {"render": True} if render else None
         return router().extract([url], provider=PROVIDER, format="markdown",
-                                timeout=CALL_TIMEOUT)
+                                provider_options=options, timeout=CALL_TIMEOUT)
 
     def _invoke_research(self, query: str):
         """The provider's research answer for `query`."""
@@ -204,9 +206,11 @@ class Calls:
         return [{"url": result.url, "title": result.title,
                  "snippet": result.description or result.content} for result in response.results]
 
-    def extract(self, url: str) -> str | None:
-        """One page's full served text, or None when the provider returned no page."""
-        response = self._call(EXTRACT_COST, lambda: self._invoke_extract(url))
+    def extract(self, url: str, render: bool = False) -> str | None:
+        """One page's text -- the served text, or with `render` the text a browser shows
+        once the page has loaded -- or None when the provider returned no page."""
+        cost = RENDER_COST if render else EXTRACT_COST
+        response = self._call(cost, lambda: self._invoke_extract(url, render))
         if response is None:
             return None
         document = response.documents[0] if response.documents else None

@@ -1,9 +1,11 @@
-"""A stand-in for the provider transport, so the HTTP tests need no network.
+"""A stand-in for the provider transport, so the HTTP and browser tests need no network.
 
 `app.builds` looks `providers.Calls` up at call time, so a test replaces that
 name with :class:`FakeCalls`. It subclasses the real :class:`app.providers.Calls`
-and overrides only the three invocations, so the retry policy, the unit refunds
-and the 80-unit budget exercised by these tests are the shipped ones.
+and overrides only the three invocations, so the retry policy, the unit refunds,
+the render cost and the 80-unit budget exercised by these tests are the shipped
+ones. Each page has a served text and the text a browser shows (`render`): the
+two differ where the corpus plants a stale reading.
 """
 from __future__ import annotations
 
@@ -15,35 +17,68 @@ from app import providers
 
 ACME = "acme-robotics.test"
 
-#: domain -> {url: (text, searchable)}
+
+@dataclasses.dataclass(frozen=True)
+class Page:
+    """One page the fake serves: its kind, publication time and two texts."""
+
+    kind: str = "own"
+    published: str | None = None
+    searchable: bool = True
+    served: str = ""
+    browser: str | None = None
+
+    def text(self, render: bool) -> str:
+        """The text served for this page, with its header lines."""
+        headers = [f"Kind: {self.kind}"]
+        if self.published:
+            headers.append(f"Published: {self.published}")
+        prose = self.browser if (render and self.browser is not None) else self.served
+        return "\n".join(headers) + "\n\n" + prose
+
+
+#: domain -> {url: Page}
 PAGES = {
     ACME: {
-        "https://acme-robotics.test/about":
-            ("Acme Robotics is headquartered in Lisbon.\n"
-             "Acme Robotics was founded in 2014.\n"
-             "Acme Robotics has raised $12M.",
-             True),
-        "https://acme-robotics.test/team":
-            ("Dana Ruiz has led Acme Robotics as chief executive since 2021.", True),
-        "https://acme-robotics.test/legal":
-            ("Acme Robotics trades under the registered name Acme Robotics, Inc.", True),
-        "https://acme-robotics.test/careers":
-            ("Acme Robotics employs about 120 people across three offices.", True),
-        "https://companies-register.test/entity/acme":
-            ("Acme Robotics was incorporated in 2014.", False),
-        "https://news.test/acme-raises":
-            ("Acme Robotics is reportedly in talks to raise $40M.", True),
+        "https://acme-robotics.test/about": Page(
+            kind="own", published="2026-01-10T00:00:00+00:00",
+            served=("Acme Robotics is headquartered in Lisbon.\n"
+                    "Acme Robotics was founded in 2014.\n"
+                    "Acme Robotics has raised $12M.")),
+        "https://acme-robotics.test/team": Page(
+            kind="own", served="Sam Ortiz has led Acme Robotics as chief executive since 2020.",
+            browser="Dana Ruiz has led Acme Robotics as chief executive since 2021."),
+        "https://acme-robotics.test/legal": Page(
+            kind="own",
+            served="Acme Robotics trades under the registered name Acme Robotics, Inc."),
+        "https://acme-robotics.test/careers": Page(
+            kind="own", searchable=False,
+            served="Acme Robotics employs about 120 people across three offices."),
+        "https://companies-register.test/entity/acme": Page(
+            kind="filing", published="2025-04-14T09:30:00+00:00", searchable=False,
+            served="Acme Robotics was incorporated in 2014."),
+        "https://news.test/acme-appoints": Page(
+            kind="news", published="2026-02-20T00:00:00+00:00",
+            served="Acme Robotics CEO: Priya Nair."),
+        "https://bizdata.test/acme": Page(
+            kind="aggregator", published="2025-12-01T00:00:00+00:00",
+            served="Acme Robotics CEO: Sam Ortiz."),
+        "https://news.test/acme-old": Page(
+            kind="news", published="2025-01-05T00:00:00+00:00",
+            served="Acme Robotics is based in Porto."),
     },
     "second-company.test": {
-        "https://second-company.test/":
-            ("Second Company makes nothing anyone would write about.", True),
+        "https://second-company.test/": Page(
+            kind="own", served="Second Company makes nothing anyone would write about."),
     },
 }
 
 #: domain -> research answer: (field, value, url, excerpt)
 RESEARCH = {
     ACME: [("founded_year", 2014, "https://companies-register.test/entity/acme",
-             "Acme Robotics was incorporated in 2014.")],
+            "Acme Robotics was incorporated in 2014."),
+           ("headcount_range", "51-200", "https://acme-robotics.test/careers",
+            "Acme Robotics employs about 120 people across three offices.")],
 }
 
 #: Methods that always refuse with a 500: a persistent provider error.
@@ -54,7 +89,7 @@ TIMEOUTS: set[str] = set()
 LIMIT = 0
 #: Seconds each attempt takes.
 DELAY = 0.0
-#: Every attempt the fake has answered: {"method", "status", "cost", "key"}.
+#: Every attempt the fake has answered: {"method", "status", "cost", "key", "render"}.
 LOG: list[dict] = []
 _lock = threading.Lock()
 _attempts: dict[tuple, int] = {}
@@ -74,6 +109,14 @@ def reset() -> None:
 def spent() -> int:
     """What the provider says these calls cost, the way a provider's own log would."""
     return sum(entry["cost"] for entry in LOG)
+
+
+def kind_of(url: str) -> str:
+    """The kind the fake serves for `url`."""
+    for pages in PAGES.values():
+        if url in pages:
+            return pages[url].kind
+    return "aggregator"
 
 
 class Refusal(Exception):
@@ -151,63 +194,59 @@ def _named(query: str) -> str | None:
     return None
 
 
-def _attempted(method: str, key: str, cost: int, status: int) -> None:
-    """Record one attempt as the provider would: a refusal costs nothing, a timeout does."""
+def _attempted(method: str, key: str, cost: int, status: int, render: bool = False) -> None:
+    """Record one attempt as the provider would: a refusal costs nothing."""
     with _lock:
         LOG.append({"method": method, "status": status,
-                    "cost": 0 if status == 429 or status == 500 else cost, "key": key})
+                    "cost": 0 if status in (429, 500) else cost, "key": key,
+                    "render": render})
 
 
-def _gate(method: str, key: tuple, cost: int) -> None:
+def _gate(method: str, key: tuple, cost: int, render: bool = False) -> None:
     """Refuse or time out this attempt as the test's fault injection says."""
     time.sleep(DELAY)
     if method in TIMEOUTS:
-        _attempted(method, key[0], cost, 200)
+        _attempted(method, key[0], cost, 200, render)
         raise NoAnswer()
     if method in FAULTS:
-        _attempted(method, key[0], cost, 500)
+        _attempted(method, key[0], cost, 500, render)
         raise Refusal(500)
     if LIMIT:
         with _lock:
             seen = _attempts.get(key, 0)
             _attempts[key] = seen + 1
         if seen < LIMIT:
-            _attempted(method, key[0], cost, 429)
+            _attempted(method, key[0], cost, 429, render)
             raise Refusal(429, "rate_limit")
 
 
 class FakeCalls(providers.Calls):
     """The three calls a build makes, answered from :data:`PAGES` through the real retry code."""
 
-    def _account(self, method: str, key: str, cost: int) -> None:
-        """Log a successful attempt at its cost."""
-        _attempted(method, key, cost, 200)
-
     def _invoke_search(self, query: str, depth: str):
         cost = providers.SEARCH_COST[depth]
         _gate("search", (query,), cost)
-        self._account("search", query, cost)
+        _attempted("search", query, cost, 200)
         domain = _named(query)
         if domain is None:
             return FakeSearch(results=[])
-        return FakeSearch(results=[
-            FakeResult(url=url) for url, (_, searchable) in PAGES[domain].items() if searchable
-        ])
+        return FakeSearch(results=[FakeResult(url=url) for url, page in PAGES[domain].items()
+                                   if page.searchable])
 
-    def _invoke_extract(self, url: str):
-        cost = providers.EXTRACT_COST
-        _gate("extract", (url,), cost)
+    def _invoke_extract(self, url: str, render: bool = False):
+        cost = providers.RENDER_COST if render else providers.EXTRACT_COST
+        _gate("extract", (url, render), cost, render)
         for pages in PAGES.values():
             if url in pages:
-                self._account("extract", url, cost)
-                return FakeExtract(documents=[FakeDocument(content=pages[url][0])])
-        self._account("extract", url, cost)
+                _attempted("extract", url, cost, 200, render)
+                return FakeExtract(documents=[FakeDocument(content=pages[url].text(render))])
+        _attempted("extract", url, cost, 200, render)
         return FakeExtract(documents=[])
 
     def _invoke_research(self, query: str):
         cost = providers.RESEARCH_COST
         _gate("research", (query,), cost)
-        self._account("research", query, cost)
+        _attempted("research", query, cost, 200)
         claims = RESEARCH.get(_named(query), [])
         structured = {name: None for name in providers.FIELDS}
         for field, value, _, _ in claims:
