@@ -200,6 +200,14 @@ class Handler(BaseHTTPRequestHandler):
         """Route a GET."""
         self._dispatch("GET")
 
+    def do_HEAD(self):  # noqa: N802 - the stdlib's method name
+        """Route a HEAD, which answers like a GET without a body."""
+        self._dispatch("HEAD")
+
+    def do_OPTIONS(self):  # noqa: N802 - the stdlib's method name
+        """Route an OPTIONS to the 404 envelope."""
+        self._dispatch("OPTIONS")
+
     def do_POST(self):  # noqa: N802 - the stdlib's method name
         """Route a POST."""
         self._dispatch("POST")
@@ -244,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        if data:
+        if data and self.command != "HEAD":
             self.wfile.write(data)
 
 

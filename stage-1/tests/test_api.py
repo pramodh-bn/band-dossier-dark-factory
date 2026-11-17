@@ -419,6 +419,14 @@ def test_unknown_query_parameters_are_ignored(world):
     assert len(world.get("/dossiers", params={"sort": "desc"}).json()["dossiers"]) == 1
 
 
+@pytest.mark.parametrize("method,path", [("HEAD", "/health"), ("OPTIONS", "/dossiers"),
+                                         ("DELETE", "/dossiers"), ("PUT", "/health")])
+def test_other_methods_never_answer_5xx(client, method, path):
+    """An unsupported method answers the §5 envelope, never a server error."""
+    response = client.request(method, path)
+    assert response.status_code < 500
+
+
 # -- refresh ---------------------------------------------------------------
 
 def test_refresh_starts_a_build(world):
