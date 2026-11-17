@@ -317,6 +317,52 @@ def test_a_failed_build_spends_nothing_and_keeps_fields_unknown(world):
         assert body["fields"][name] == {"value": None, "status": "unknown", "citations": []}
 
 
+def test_a_failed_refresh_keeps_the_last_ready_fields(world):
+    """A later build that fails leaves the fields and `researched_at` as they were."""
+    world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+    ready = wait_ready(world, ACME)
+    fakeweb.FAULTS.update({"search", "extract", "research"})
+    world.post(f"/dossiers/{ACME}/refresh", headers={"Idempotency-Key": key()})
+    failed = wait_ready(world, ACME)
+    assert failed["state"] == "failed"
+    assert failed["fields"] == ready["fields"]
+    assert failed["researched_at"] == ready["researched_at"]
+    assert failed["spent_units"] == ready["spent_units"]
+
+
+def test_a_slow_but_answering_provider_still_settles_within_ten_seconds(world):
+    """A build whose calls each answer in about a fifth of a second ends inside §8's bound."""
+    import time as clock  # noqa: PLC0415 - a local name for the bound this checks
+
+    fakeweb.DELAY = 0.2
+    started = clock.monotonic()
+    world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+    body = wait_ready(world, ACME, seconds=10)
+    assert body["state"] == "ready"
+    assert clock.monotonic() - started < 10
+
+
+def test_fifty_concurrent_requests_are_all_answered(world, client):
+    """Fifty requests in flight at once are all answered, and none is a 5xx."""
+    world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+    wait_ready(world, ACME)
+    auth = world.headers["Authorization"]
+
+    def send(index):
+        target = ["read", "list", "create"][index % 3]
+        if target == "read":
+            return client.get(f"/dossiers/{ACME}", headers={"Authorization": auth})
+        if target == "list":
+            return client.get("/dossiers", headers={"Authorization": auth})
+        return client.post("/dossiers", json={"domain": f"bulk-{index}.test"},
+                           headers={"Authorization": auth, "Idempotency-Key": key()})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as pool:
+        responses = list(pool.map(send, range(50)))
+    assert all(response.status_code < 500 for response in responses)
+    assert all(response.status_code in (200, 202) for response in responses)
+
+
 # -- listing ---------------------------------------------------------------
 
 def test_list_entry_and_order(world):

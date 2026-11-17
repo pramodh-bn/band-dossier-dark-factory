@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from . import errors, store as state
 from .builds import Builder
 from .domain import InvalidDomain, normalised_or_raise
-from .store import summary
 
 PLAIN_DIGITS = re.compile(r"[0-9]+")
 DEFAULT_LIMIT = 50

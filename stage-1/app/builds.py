@@ -16,9 +16,11 @@ from .domain import company_name
 BUDGET_UNITS = 80
 #: Pages that are not searchable surface only through a research citation's URL.
 EXTRACT_LIMIT = 34
+#: Extract slots kept for pages only a research citation names, so a full set of search
+#: results cannot crowd them out.
+RESEARCH_RESERVE = 6
 WORKERS = 8
 MAX_CITATIONS = 6
-
 
 def queries(domain: str) -> list[str]:
     """The searches one build makes: the first is exactly the domain, the rest name the
@@ -115,16 +117,16 @@ class Builder:
         extracted: set[str] = set()
         counter = threading.Lock()
 
-        def remember(url: str) -> bool:
+        def remember(url: str, limit: int) -> bool:
             """Keep this URL for extraction; False once the build has left its extract budget."""
             with counter:
-                if url in extracted or len(extracted) >= EXTRACT_LIMIT:
+                if url in extracted or len(extracted) >= limit:
                     return False
                 extracted.add(url)
                 return True
 
-        def gather(url: str) -> None:
-            if not self.store.still_current(dossier, generation) or not remember(url):
+        def gather(url: str, limit: int = EXTRACT_LIMIT) -> None:
+            if not self.store.still_current(dossier, generation) or not remember(url, limit):
                 return
             text = calls.extract(url)
             if text is not None:
@@ -132,10 +134,13 @@ class Builder:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS + 1) as pool:
             research = pool.submit(calls.research, providers.research_query(domain))
-            for query in queries(domain):
+            # The searches run beside each other: ten sequential calls would take ten
+            # seconds of provider latency, and §8 gives a fast build ten in total.
+            pending = [pool.submit(calls.search, query) for query in queries(domain)]
+            for future in pending:
                 if not self.store.still_current(dossier, generation):
                     return
-                results = calls.search(query)
+                results = future.result()
                 if not results:
                     continue
                 for result in results:
@@ -147,7 +152,7 @@ class Builder:
             for url in sorted(urls, key=lambda url: (not url.startswith("https://" + domain),
                                                      url)):
                 if self.store.still_current(dossier, generation):
-                    pool.submit(gather, url)
+                    pool.submit(gather, url, EXTRACT_LIMIT - RESEARCH_RESERVE)
             try:
                 answer = research.result()
             except Exception:  # noqa: BLE001 - a research failure is a failed call
