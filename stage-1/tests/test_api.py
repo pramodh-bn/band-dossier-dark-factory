@@ -363,6 +363,94 @@ def test_fifty_concurrent_requests_are_all_answered(world, client):
     assert all(response.status_code in (200, 202) for response in responses)
 
 
+# -- accounts: ids must never collide with a seeded one --------------------
+
+def seeded(ids=("u_1", "u_2")) -> dict:
+    """A fixture whose users hold the numeric ids a fresh service also starts from."""
+    users = [{"id": user_id, "email": f"user{index}@example.com", "password": "correct horse",
+              "display_name": f"User{index}"}
+             for index, user_id in enumerate(ids, start=1)]
+    return {"now": NOW, "users": users}
+
+
+def test_signup_does_not_take_a_seeded_id(client):
+    """A signup after a fixture seeding `u_1`/`u_2` gets its own id and overwrites nobody."""
+    client.post("/_test/reset", json=seeded())
+    signed = client.post("/auth/signup", json={"email": "c@example.com",
+                                               "password": "correct horse",
+                                               "display_name": "C"})
+    assert signed.status_code == 201
+    new_id = signed.json()["user_id"]
+    assert new_id not in {"u_1", "u_2"}
+    for index, user_id in enumerate(("u_1", "u_2"), start=1):
+        logged = client.post("/auth/login", json={"email": f"user{index}@example.com",
+                                                  "password": "correct horse"})
+        assert logged.status_code == 200
+        assert logged.json()["user_id"] == user_id
+        assert logged.json()["display_name"] == f"User{index}"
+    own = client.post("/auth/login", json={"email": "c@example.com",
+                                           "password": "correct horse"})
+    assert own.status_code == 200 and own.json()["user_id"] == new_id
+
+
+def test_several_signups_skip_every_seeded_id(client):
+    """Ids seeded in a sparse range are all skipped, and every account keeps its identity."""
+    client.post("/_test/reset", json=seeded(("u_1", "u_2", "u_3")))
+    made = []
+    for index in range(3):
+        response = client.post("/auth/signup", json={"email": f"new{index}@example.com",
+                                                     "password": "correct horse",
+                                                     "display_name": f"New{index}"})
+        assert response.status_code == 201
+        made.append(response.json()["user_id"])
+    assert len(set(made)) == 3 and not set(made) & {"u_1", "u_2", "u_3"}
+    for user_id in ("u_1", "u_3"):
+        index = int(user_id.split("_")[1])
+        logged = client.post("/auth/login", json={"email": f"user{index}@example.com",
+                                                  "password": "correct horse"})
+        assert logged.json()["user_id"] == user_id
+
+
+def test_concurrent_signups_get_distinct_ids(client):
+    """Fifty simultaneous signups after a seeded `u_1` all get unique ids, none of them seeded."""
+    client.post("/_test/reset", json=seeded(("u_1",)))
+
+    def signup(index):
+        return httpx.post(f"{client.base_url}/auth/signup",
+                          json={"email": f"bulk{index}@example.com",
+                                "password": "correct horse", "display_name": f"Bulk{index}"},
+                          timeout=20)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(signup, range(20)))
+    assert all(response.status_code == 201 for response in responses)
+    ids = [response.json()["user_id"] for response in responses]
+    assert len(set(ids)) == 20 and "u_1" not in ids
+    for index in range(20):
+        logged = client.post("/auth/login", json={"email": f"bulk{index}@example.com",
+                                                  "password": "correct horse"})
+        assert logged.status_code == 200 and logged.json()["user_id"] == ids[index]
+    seeded_login = client.post("/auth/login", json={"email": "user1@example.com",
+                                                    "password": "correct horse"})
+    assert seeded_login.json()["user_id"] == "u_1"
+
+
+def test_a_new_dossier_id_does_not_take_an_imported_one(client, world):
+    """A state imported with a dossier `d_1` keeps it, and the next dossier gets another id."""
+    world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+    wait_ready(world, ACME)
+    snapshot = client.get("/_test/export").json()
+    snapshot["state"]["sequences"] = {"user": 0, "dossier": 0}
+    client.post("/_test/reset", json=fixture())
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    assert world.get(f"/dossiers/{ACME}").json()["dossier_id"] == "d_1"
+    assert world.post("/dossiers", json={"domain": "second-company.test"},
+                      headers={"Idempotency-Key": key()}).status_code == 202
+    created = wait_ready(world, "second-company.test")
+    assert created["dossier_id"] != "d_1"
+    assert world.get(f"/dossiers/{ACME}").json()["dossier_id"] == "d_1"
+
+
 # -- listing ---------------------------------------------------------------
 
 def test_list_entry_and_order(world):
@@ -459,7 +547,7 @@ def test_refresh_while_building_starts_no_second_build(world):
     assert first.json() == again.json()
     body = wait_ready(world, ACME)
     assert body["state"] == "ready"
-    assert fakeweb.CALLS.count("search") == 10
+    assert sum(1 for entry in fakeweb.LOG if entry["method"] == "search") == 10
 
 
 def test_refresh_of_an_unknown_domain_is_404(world):
@@ -590,7 +678,7 @@ def test_reads_make_no_provider_call(client, world):
     """Reading a dossier, listing, exporting and signing in make no provider call."""
     world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
     wait_ready(world, ACME)
-    fakeweb.CALLS.clear()
+    fakeweb.LOG.clear()
     world.get(f"/dossiers/{ACME}")
     world.get("/dossiers")
     client.get("/_test/export")
@@ -602,7 +690,7 @@ def test_reads_make_no_provider_call(client, world):
                           headers={"Idempotency-Key": "replay"})
     world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": "replay"})
     assert replicas.status_code == 200
-    assert fakeweb.CALLS == []
+    assert fakeweb.LOG == []
 
 
 # -- export and import -----------------------------------------------------

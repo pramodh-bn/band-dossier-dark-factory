@@ -1,13 +1,17 @@
-"""A stand-in for the provider layer, so the HTTP tests need no network.
+"""A stand-in for the provider transport, so the HTTP tests need no network.
 
 `app.builds` looks `providers.Calls` up at call time, so a test replaces that
-name with :class:`FakeCalls`; everything above it -- routing, the store, the
-background build, the 80-unit accounting -- is the real implementation.
+name with :class:`FakeCalls`. It subclasses the real :class:`app.providers.Calls`
+and overrides only the three invocations, so the retry policy, the unit refunds
+and the 80-unit budget exercised by these tests are the shipped ones.
 """
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
+
+from app import providers
 
 ACME = "acme-robotics.test"
 
@@ -42,20 +46,83 @@ RESEARCH = {
              "Acme Robotics was incorporated in 2014.")],
 }
 
-#: Methods the fake provider refuses; a test sets this to simulate an outage.
+#: Methods that always refuse with a 500: a persistent provider error.
 FAULTS: set[str] = set()
-#: Every provider call the fake has answered, for the "no provider call from a read" check.
-CALLS: list[str] = []
-#: Seconds each call takes, for a test that needs to see a build in flight.
+#: Methods that never answer: each attempt costs its units and raises a timeout.
+TIMEOUTS: set[str] = set()
+#: Refuse the first :data:`LIMIT` attempts of every distinct call with a 429, then answer.
+LIMIT = 0
+#: Seconds each attempt takes.
 DELAY = 0.0
+#: Every attempt the fake has answered: {"method", "status", "cost", "key"}.
+LOG: list[dict] = []
+_lock = threading.Lock()
+_attempts: dict[tuple, int] = {}
 
 
 def reset() -> None:
-    """Clear the fault injection, the call log and any delay."""
-    global DELAY  # pylint: disable=global-statement
+    """Clear the injected faults, the attempt counts, the delay and the log."""
+    global DELAY, LIMIT  # pylint: disable=global-statement
     FAULTS.clear()
-    CALLS.clear()
+    TIMEOUTS.clear()
+    LOG.clear()
+    _attempts.clear()
     DELAY = 0.0
+    LIMIT = 0
+
+
+def spent() -> int:
+    """What the provider says these calls cost, the way a provider's own log would."""
+    return sum(entry["cost"] for entry in LOG)
+
+
+class Refusal(Exception):
+    """A provider answering with an error status, which costs nothing."""
+
+    def __init__(self, status: int, kind: str = "upstream") -> None:
+        super().__init__(f"provider answered {status}")
+        self.status_code = status
+        self.kind = kind
+
+
+class NoAnswer(Exception):
+    """A call whose answer never arrived, which costs its units."""
+
+    def __init__(self) -> None:
+        super().__init__("no answer")
+        self.status_code = None
+        self.kind = "timeout"
+
+
+@dataclasses.dataclass
+class FakeResult:
+    """The part of a search result a build reads."""
+
+    url: str
+    title: str = ""
+    description: str = ""
+    content: str = ""
+
+
+@dataclasses.dataclass
+class FakeSearch:
+    """The part of a search response a build reads."""
+
+    results: list
+
+
+@dataclasses.dataclass
+class FakeDocument:
+    """The part of an extracted document a build reads."""
+
+    content: str
+
+
+@dataclasses.dataclass
+class FakeExtract:
+    """The part of an extract response a build reads."""
+
+    documents: list
 
 
 @dataclasses.dataclass
@@ -67,6 +134,14 @@ class FakeCitation:
     snippet: str
 
 
+@dataclasses.dataclass
+class FakeResearch:
+    """The part of a research response a build reads."""
+
+    structured: dict
+    citations: list
+
+
 def _named(query: str) -> str | None:
     """The domain a query names, by domain or by first label."""
     lowered = query.lower()
@@ -76,51 +151,67 @@ def _named(query: str) -> str | None:
     return None
 
 
-class FakeCalls:  # pylint: disable=too-few-public-methods
-    """The three calls a build makes, answered from :data:`PAGES` at the same unit costs."""
+def _attempted(method: str, key: str, cost: int, status: int) -> None:
+    """Record one attempt as the provider would: a refusal costs nothing, a timeout does."""
+    with _lock:
+        LOG.append({"method": method, "status": status,
+                    "cost": 0 if status == 429 or status == 500 else cost, "key": key})
 
-    def __init__(self, budget) -> None:
-        self.budget = budget
-        self.succeeded = False
 
-    def search(self, query: str, depth: str = "lite") -> list[dict] | None:
-        """Answer a search with the named company's searchable pages."""
-        CALLS.append("search")
-        time.sleep(DELAY)
-        if "search" in FAULTS or not self.budget.reserve(1):
-            return None
-        self.succeeded = True
+def _gate(method: str, key: tuple, cost: int) -> None:
+    """Refuse or time out this attempt as the test's fault injection says."""
+    time.sleep(DELAY)
+    if method in TIMEOUTS:
+        _attempted(method, key[0], cost, 200)
+        raise NoAnswer()
+    if method in FAULTS:
+        _attempted(method, key[0], cost, 500)
+        raise Refusal(500)
+    if LIMIT:
+        with _lock:
+            seen = _attempts.get(key, 0)
+            _attempts[key] = seen + 1
+        if seen < LIMIT:
+            _attempted(method, key[0], cost, 429)
+            raise Refusal(429, "rate_limit")
+
+
+class FakeCalls(providers.Calls):
+    """The three calls a build makes, answered from :data:`PAGES` through the real retry code."""
+
+    def _account(self, method: str, key: str, cost: int) -> None:
+        """Log a successful attempt at its cost."""
+        _attempted(method, key, cost, 200)
+
+    def _invoke_search(self, query: str, depth: str):
+        cost = providers.SEARCH_COST[depth]
+        _gate("search", (query,), cost)
+        self._account("search", query, cost)
         domain = _named(query)
         if domain is None:
-            return []
-        return [{"url": url, "title": "", "snippet": ""}
-                for url, (_, searchable) in PAGES[domain].items() if searchable]
+            return FakeSearch(results=[])
+        return FakeSearch(results=[
+            FakeResult(url=url) for url, (_, searchable) in PAGES[domain].items() if searchable
+        ])
 
-    def extract(self, url: str) -> str | None:
-        """Answer an extract with a page's full served text."""
-        CALLS.append("extract")
-        time.sleep(DELAY)
-        if "extract" in FAULTS or not self.budget.reserve(1):
-            return None
+    def _invoke_extract(self, url: str):
+        cost = providers.EXTRACT_COST
+        _gate("extract", (url,), cost)
         for pages in PAGES.values():
             if url in pages:
-                self.succeeded = True
-                return pages[url][0]
-        return None
+                self._account("extract", url, cost)
+                return FakeExtract(documents=[FakeDocument(content=pages[url][0])])
+        self._account("extract", url, cost)
+        return FakeExtract(documents=[])
 
-    def research(self, query: str) -> tuple[dict, list] | None:
-        """Answer a research run with the named company's claims."""
-        CALLS.append("research")
-        time.sleep(DELAY)
-        if "research" in FAULTS or not self.budget.reserve(25):
-            return None
-        self.succeeded = True
-        domain = _named(query)
-        claims = RESEARCH.get(domain, [])
-        structured = {name: None for name in
-                      ("legal_name", "hq_city", "ceo", "founded_year", "headcount_range",
-                       "funding_total")}
+    def _invoke_research(self, query: str):
+        cost = providers.RESEARCH_COST
+        _gate("research", (query,), cost)
+        self._account("research", query, cost)
+        claims = RESEARCH.get(_named(query), [])
+        structured = {name: None for name in providers.FIELDS}
         for field, value, _, _ in claims:
             structured[field] = value
-        return structured, [FakeCitation(url=url, field=f"$.{field}", snippet=excerpt)
-                            for field, _, url, excerpt in claims]
+        return FakeResearch(structured=structured,
+                            citations=[FakeCitation(url=url, field=f"$.{field}", snippet=excerpt)
+                                       for field, _, url, excerpt in claims])

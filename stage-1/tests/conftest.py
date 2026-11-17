@@ -58,9 +58,31 @@ def service():
 
 
 @pytest.fixture(autouse=True)
-def fake_reset():
-    """Clear the fake's faults, delay and call log before each check."""
+def fake_reset(monkeypatch):
+    """Clear the fake's faults, delay and call log before each check, and keep retries quick.
+
+    The retry policy itself is the shipped one; only its waits are shortened so a
+    test that exercises four attempts does not spend five seconds doing it. The log
+    is cleared only once no build is still calling: a build a reset superseded may
+    finish calls already in flight, and they must not land in the next check's log.
+    """
+    wait_quiet()
     fakeweb.reset()
+    monkeypatch.setattr(providers, "BACKOFF", (0.0, 0.01, 0.01, 0.01))
+
+
+def wait_quiet(stable: float = 0.2, limit: float = 10.0) -> None:
+    """Wait until the fake's call log has stopped growing for `stable` seconds."""
+    deadline = time.monotonic() + limit
+    seen = len(fakeweb.LOG)
+    since = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        current = len(fakeweb.LOG)
+        if current != seen:
+            seen, since = current, time.monotonic()
+        elif time.monotonic() - since >= stable:
+            return
 
 
 @pytest.fixture
@@ -85,13 +107,32 @@ def fixture() -> dict:
 
 @pytest.fixture
 def world(client):
-    """A reset service with Alice signed in."""
+    """A reset service with Alice signed in.
+
+    At teardown it waits for any build still running, so a later check never sees
+    another check's provider calls in its own call log.
+    """
     client.post("/_test/reset", json=fixture())
     token = client.post("/auth/login", json={"email": ALICE["email"],
                                              "password": ALICE["password"]}).json()["token"]
     with httpx.Client(base_url=str(client.base_url), timeout=10,
                       headers={"Authorization": f"Bearer {token}"}) as authed:
         yield authed
+        drain(authed)
+
+
+def drain(client, seconds: float = 30.0) -> None:
+    """Wait, best effort, until no dossier is building."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            body = client.get("/dossiers", params={"limit": 200})
+            if body.status_code != 200 or all(
+                    entry["state"] != "building" for entry in body.json()["dossiers"]):
+                return
+        except (httpx.HTTPError, ValueError, KeyError):
+            return
+        time.sleep(0.02)
 
 
 def wait_ready(client, domain: str, seconds: float = 10.0) -> dict:

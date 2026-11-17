@@ -132,11 +132,17 @@ class Builder:
             if text is not None:
                 pages[url] = text
 
+        def search(query: str):
+            """One search, skipped when a reset or import has already superseded this build."""
+            if not self.store.still_current(dossier, generation):
+                return None
+            return calls.search(query)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS + 1) as pool:
             research = pool.submit(calls.research, providers.research_query(domain))
             # The searches run beside each other: ten sequential calls would take ten
             # seconds of provider latency, and §8 gives a fast build ten in total.
-            pending = [pool.submit(calls.search, query) for query in queries(domain)]
+            pending = [pool.submit(search, query) for query in queries(domain)]
             for future in pending:
                 if not self.store.still_current(dossier, generation):
                     return

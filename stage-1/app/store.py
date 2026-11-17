@@ -228,8 +228,7 @@ class Store:  # pylint: disable=too-many-instance-attributes
         with self.lock:
             if email.lower() in self.by_email:
                 raise errors.email_taken()
-            self._user_seq += 1
-            user["id"] = f"u_{self._user_seq}"
+            user["id"] = self._next_user_id()
             token = passwords.new_token()
             self.users[user["id"]] = user
             self.by_email[email.lower()] = user["id"]
@@ -282,11 +281,31 @@ class Store:  # pylint: disable=too-many-instance-attributes
             existing = self.dossiers.get(domain)
             if existing is not None:
                 return summary(existing), existing, False
-            self._dossier_seq += 1
-            dossier = Dossier(dossier_id=f"d_{self._dossier_seq}", domain=domain,
+            dossier = Dossier(dossier_id=self._next_dossier_id(), domain=domain,
                               state="building", running=True, generation=self.generation)
             self.dossiers[domain] = dossier
             return summary(dossier), dossier, True
+
+    def _next_dossier_id(self) -> str:
+        """A fresh opaque dossier id that no dossier -- imported or created -- already holds."""
+        taken = {dossier.dossier_id for dossier in self.dossiers.values()}
+        while True:
+            self._dossier_seq += 1
+            candidate = f"d_{self._dossier_seq}"
+            if candidate not in taken:
+                return candidate
+
+    def _next_user_id(self) -> str:
+        """A fresh opaque user id that no account -- seeded or signed up -- already holds.
+
+        A fixture may seed any ids it likes, `u_1` included; a new account must never
+        take one of them, or the signup would overwrite a seeded user.
+        """
+        while True:
+            self._user_seq += 1
+            candidate = f"u_{self._user_seq}"
+            if candidate not in self.users:
+                return candidate
 
     def claim_build(self, dossier: Dossier) -> int | None:
         """Start a build of `dossier`, or None when one is already running."""
