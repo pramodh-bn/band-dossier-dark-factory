@@ -562,7 +562,9 @@ def migrated_field(name: str, value, researched_at) -> dict:
         candidates = [_validated_candidate(name, candidate) for candidate in imported]
     else:
         candidates = candidates_module.candidates_from_citations(
-            value.get("value"), value.get("citations") or [], researched_at)
+            value.get("value"), value.get("citations") or [], researched_at,
+            kind=candidates_module.legacy_kind(value.get("kind")),
+            published_at=candidates_module.legacy_published(value.get("published_at")))
     return candidates_module.field(candidates)
 
 

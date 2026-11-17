@@ -6,7 +6,9 @@ provider, then value -- so the same candidates always select the same value.
 """
 from __future__ import annotations
 
-from .pages import AUTHORITY
+from datetime import datetime
+
+from .pages import AUTHORITY, KINDS
 
 PROVIDERS = ("nimble", "tavily", "kernel", "browserbase")
 PROVIDER_ORDER = {name: index for index, name in enumerate(PROVIDERS)}
@@ -103,25 +105,47 @@ def field(candidates: list[dict]) -> dict:
     }
 
 
+def legacy_kind(stated):
+    """A kind a legacy export records, when it names one of the four; else None."""
+    return stated if isinstance(stated, str) and stated in KINDS else None
+
+
+def legacy_published(stated):
+    """A publication time a legacy export records, as an RFC 3339 instant, or None."""
+    if not isinstance(stated, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(stated.upper().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment.isoformat()
+
+
 def candidates_from_citations(value, citations: list[dict], retrieved_at, kind=None,
                               published_at=None) -> list[dict]:
     """The candidates an imported field's citations support: one per cited page (§2, upgrade).
 
     A stage-1 export keeps the value and the excerpts that support it, not the
-    page texts; each citation names a page whose served text supported the value,
-    which is exactly one candidate per page.
+    page texts, so every citation is one recoverable candidate: its page's served
+    text supported this value, and the excerpt is that text. A kind or
+    publication time the legacy state records for the page is kept; anything the
+    export does not carry stays null (aggregator authority), because inventing it
+    would need a provider call, which import may not make.
     """
     if value is None:
         return []
     made = []
     for citation in citations:
-        url = citation.get("url") if isinstance(citation, dict) else None
-        excerpt = citation.get("excerpt") if isinstance(citation, dict) else None
-        provider = citation.get("provider") if isinstance(citation, dict) else None
+        if not isinstance(citation, dict):
+            continue
+        url, excerpt = citation.get("url"), citation.get("excerpt")
+        provider = citation.get("provider")
         if not (isinstance(url, str) and isinstance(excerpt, str) and excerpt):
             continue
         made.append({"value": value, "url": url, "excerpt": excerpt,
-                     "provider": provider if isinstance(provider, str) else "nimble",
-                     "kind": kind, "published_at": published_at,
+                     "provider": provider if isinstance(provider, str) else PROVIDERS[0],
+                     "kind": legacy_kind(citation.get("kind")) or kind,
+                     "published_at": legacy_published(citation.get("published_at"))
+                     or published_at,
                      "retrieved_at": retrieved_at, "selected": False})
     return made

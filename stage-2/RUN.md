@@ -102,8 +102,20 @@ Screens at both widths are in `screenshots/`.
 
 ## Upgrading from Stage 1
 
-`POST /_test/import` accepts this team's Stage 1 export unchanged. Each imported
-field gains one candidate per cited page (the excerpts Stage 1 kept), with no kind
-(so aggregator authority) and the dossier's `researched_at` as its retrieval time;
-accounts, tokens and stored idempotent responses are preserved. The next ready
-build replaces those candidates with the ones it gathers.
+`POST /_test/import` accepts this team's Stage 1 export unchanged. For every
+non-null field, each stored citation becomes one imported candidate: the field's
+value, that citation's URL, excerpt and provider are kept exactly, `retrieved_at`
+is the dossier's `researched_at`, and `kind`/`published_at` are taken from the
+legacy state when it records them and are null otherwise (null kind has
+aggregator authority). A citation repeated for the same page and value is one
+candidate. The Stage 2 selection rule then sets the field's value, status and
+citations, and the next ready build replaces the imported candidates. Accounts,
+tokens, dossier ids, idempotent responses and the clock are preserved, so a
+signed-in browser stays signed in and a lost write still replays.
+
+**Known limitation.** A Stage 1 export keeps the values it selected and the
+excerpts that supported them, not the gathered page texts. Evidence Stage 1
+gathered but never cited cannot be recovered from the export, and import makes no
+provider call (§10), so an imported field has candidates only for the citations
+it carries — it cannot be `contested` from evidence the export does not name. The
+next completed build is the point at which full evidence returns.

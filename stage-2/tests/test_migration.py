@@ -1,9 +1,17 @@
 """Upgrading a Stage 1 export (§2, "Existing clients after an upgrade").
 
 A Stage 1 export keeps each field's value and the citations that supported it,
-not the gathered page texts. Importing it must produce one candidate per cited
-page, keep accounts and tokens, keep idempotent responses replayable, and let
-the next ready build replace the imported candidates.
+not the gathered page texts. The strongest deterministic migration is therefore
+one candidate per stored citation -- exact value, URL, excerpt and provider --
+with the dossier's `researched_at` as the retrieval time and any kind or
+publication time the legacy state records; everything else stays null, because
+filling it in would need a provider call, which import may not make. Accounts,
+tokens, ids and stored idempotent responses survive, and the next ready build
+replaces the imported candidates.
+
+The unavoidable limitation is stated as a test too: a legacy export cannot grow
+a candidate its citations do not name. Evidence the Stage 1 service gathered but
+never cited is not recoverable from the export at all.
 """
 from __future__ import annotations
 
@@ -35,6 +43,21 @@ def as_stage_one(export: dict) -> dict:
     for dossier in state["dossiers"]:
         for field in dossier["fields"].values():
             field.pop("candidates", None)
+    return export
+
+
+def empty_field() -> dict:
+    """An unknown field as a legacy export writes it."""
+    return {"value": None, "status": "unknown", "citations": []}
+
+
+def legacy_export(client, fields: dict, dossier_id: str = "d_legacy") -> dict:
+    """A valid export whose one dossier carries `fields`, in the Stage 1 shape."""
+    export = client.get("/_test/export").json()
+    export["state"]["dossiers"] = [{
+        "dossier_id": dossier_id, "domain": ACME, "state": "ready",
+        "researched_at": NOW, "spent_units": 47,
+        "fields": {**{name: empty_field() for name in FIELDS}, **fields}}]
     return export
 
 
@@ -72,6 +95,129 @@ def test_a_stage_one_export_becomes_candidates(client, world):
         assert field["citations"] == [
             {"url": candidate["url"], "excerpt": candidate["excerpt"],
              "provider": candidate["provider"]} for candidate in field["candidates"]], name
+
+
+def test_every_stored_citation_becomes_one_candidate(client, world):
+    """All citations a legacy field stores migrate exactly, in rank order, with one build."""
+    legal = [
+        {"url": "https://acme-robotics.test/legal",
+         "excerpt": "Acme Robotics trades under the registered name Acme Robotics, Inc.",
+         "provider": "nimble"},
+        {"url": "https://companies-register.test/entity/acme",
+         "excerpt": "The register records Acme Robotics, Inc. as the registered name.",
+         "provider": "nimble"},
+    ]
+    ceo = [
+        {"url": "https://acme-robotics.test/team",
+         "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+         "provider": "nimble"},
+    ]
+    snapshot = legacy_export(client, {
+        "legal_name": {"value": "Acme Robotics, Inc.", "status": "known", "citations": legal},
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": ceo},
+    })
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    restored = world.get(f"/dossiers/{ACME}").json()
+    assert restored["dossier_id"] == "d_legacy"
+    assert restored["researched_at"] == NOW and restored["spent_units"] == 47
+    legal_field = restored["fields"]["legal_name"]
+    assert legal_field["status"] == "known" and legal_field["value"] == "Acme Robotics, Inc."
+    assert [(c["url"], c["excerpt"], c["provider"]) for c in legal_field["candidates"]] == \
+        [(c["url"], c["excerpt"], c["provider"]) for c in legal]
+    assert all(c["kind"] is None and c["published_at"] is None
+               for c in legal_field["candidates"])
+    assert all(c["retrieved_at"] == NOW for c in legal_field["candidates"])
+    assert [c["selected"] for c in legal_field["candidates"]] == [True, False]
+    assert legal_field["citations"] == [{"url": c["url"], "excerpt": c["excerpt"],
+                                         "provider": c["provider"]}
+                                        for c in legal_field["candidates"]]
+    assert restored["fields"]["ceo"]["candidates"] == [{
+        "value": "Dana Ruiz", "url": "https://acme-robotics.test/team",
+        "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+        "provider": "nimble", "kind": None, "published_at": None,
+        "retrieved_at": NOW, "selected": True}]
+    assert restored["fields"]["ceo"]["citations"] == [{
+        "url": "https://acme-robotics.test/team",
+        "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+        "provider": "nimble"}]
+
+
+def test_a_legacy_export_cannot_grow_candidates_it_did_not_cite(client, world):
+    """The migration keeps exactly the citations the export carries -- no more, no fewer.
+
+    This is the documented limitation: evidence Stage 1 gathered but never cited is
+    not in the export, and import may not call a provider to fetch it again.
+    """
+    two = [{"url": "https://acme-robotics.test/about",
+            "excerpt": "Acme Robotics is headquartered in Lisbon.", "provider": "nimble"},
+           {"url": "https://directory.test/acme",
+            "excerpt": "Acme Robotics is headquartered in Lisbon, our records say.",
+            "provider": "nimble"}]
+    snapshot = legacy_export(client, {
+        "hq_city": {"value": "Lisbon", "status": "known", "citations": two}})
+    client.post("/_test/import", json=snapshot)
+    restored = world.get(f"/dossiers/{ACME}").json()
+    assert len(restored["fields"]["hq_city"]["candidates"]) == len(two)
+    assert {c["url"] for c in restored["fields"]["hq_city"]["candidates"]} == \
+        {c["url"] for c in two}
+    for name in FIELDS:
+        if name != "hq_city":
+            assert restored["fields"][name] == {"value": None, "status": "unknown",
+                                               "citations": [], "candidates": []}
+
+
+def test_a_legacy_kind_and_publication_time_are_kept_when_present(client, world):
+    """Facts the legacy state records for a page reach its candidate and steer the ranking."""
+    own = {"url": "https://acme-robotics.test/team",
+           "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+           "provider": "nimble", "kind": "own"}
+    news = {"url": "https://news.test/acme-appoints",
+            "excerpt": "Acme Robotics CEO: Priya Nair.", "provider": "nimble",
+            "kind": "news", "published_at": "2026-02-20T00:00:00+00:00"}
+    snapshot = legacy_export(client, {
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": [news, own]}})
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    field = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]
+    assert [(c["kind"], c["published_at"]) for c in field["candidates"]] == \
+        [("own", None), ("news", "2026-02-20T00:00:00+00:00")]
+    assert field["value"] == "Dana Ruiz"                 # own outranks news
+    assert field["status"] == "known"
+
+
+def test_a_duplicated_page_and_value_is_one_candidate(client, world):
+    """Two citations of the same page for the same value are one candidate."""
+    same = {"url": "https://acme-robotics.test/about",
+            "excerpt": "Acme Robotics was founded in 2014.", "provider": "nimble"}
+    snapshot = legacy_export(client, {
+        "founded_year": {"value": 2014, "status": "known", "citations": [same, dict(same)]}})
+    client.post("/_test/import", json=snapshot)
+    field = world.get(f"/dossiers/{ACME}").json()["fields"]["founded_year"]
+    assert len(field["candidates"]) == 1 and field["value"] == 2014
+
+
+def test_imported_ids_and_accounts_are_preserved(client, world):
+    """The dossier's id, the accounts and their tokens survive the migration."""
+    signed_up = client.post("/auth/signup", json={"email": "dee@example.com",
+                                                  "password": "correct horse",
+                                                  "display_name": "Dee"}).json()
+    snapshot = legacy_export(client, {"ceo": {"value": "Dana Ruiz", "status": "known",
+                                              "citations": [
+                                                  {"url": "https://acme-robotics.test/team",
+                                                   "excerpt": "Dana Ruiz has led Acme "
+                                                              "Robotics as chief executive.",
+                                                   "provider": "nimble"}]}})
+    client.post("/_test/import", json=snapshot)
+    assert world.get(f"/dossiers/{ACME}").json()["dossier_id"] == "d_legacy"
+    users = {user["id"]: user for user in client.get("/_test/export").json()["state"]["users"]}
+    assert users["u_alice"]["email"] == "alice@example.com"
+    assert users[signed_up["user_id"]]["email"] == "dee@example.com"
+    assert user_password_works(client, "dee@example.com")
+
+
+def user_password_works(client, email: str) -> bool:
+    """Whether a migrated account still logs in with its password."""
+    return client.post("/auth/login", json={"email": email,
+                                            "password": "correct horse"}).status_code == 200
 
 
 def test_tokens_and_replays_survive_the_upgrade(client, world):
