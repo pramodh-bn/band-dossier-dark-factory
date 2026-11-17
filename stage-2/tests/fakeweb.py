@@ -71,6 +71,13 @@ PAGES = {
         "https://second-company.test/": Page(
             kind="own", served="Second Company makes nothing anyone would write about."),
     },
+    "rival-works.test": {
+        "https://rival-works.test/about": Page(
+            kind="own", served="Rival Works was founded in 2011 and is based in Ghent."),
+        "https://directory.test/rival-works": Page(
+            kind="aggregator", published="2026-01-02T00:00:00+00:00",
+            served="Rival Works was founded in 1911 according to our records."),
+    },
 }
 
 #: domain -> research answer: (field, value, url, excerpt)

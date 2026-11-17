@@ -76,6 +76,9 @@ def test_screens_are_directly_navigable(world, page, route, anchor, signed):
     page.goto(route.format(domain=ACME))
     found = page.locator(", ".join(f"[data-testid='{name}']" for name in anchor.split("|")))
     expect(found.first).to_be_attached()
+    if signed:
+        expect(page.get_by_test_id("current-user")).to_be_visible()
+        expect(page.get_by_test_id("logout-button")).to_be_visible()
 
 
 def test_sign_in_and_sign_out(world, page):
@@ -288,7 +291,60 @@ def test_the_list_filters_and_shows_states(world, page):
     expect(items).to_have_count(2)
     assert items.nth(0).get_attribute("data-testid") == f"dossier-item-{ACME}"
     expect(page.get_by_test_id(f"dossier-item-{ACME}")).to_have_attribute("data-state", "ready")
+    link = page.get_by_test_id(f"dossier-item-{ACME}").locator("a[href]").first
+    assert link.get_attribute("href") == f"/dossiers/{ACME}"
     page.get_by_test_id("dossier-search").fill("second")
     expect(page.locator("[data-testid^=dossier-item-]")).to_have_count(1)
     page.get_by_test_id("dossier-search").fill("nothing-matches")
     expect(page.get_by_test_id("empty-dossiers")).to_be_visible()
+
+
+def test_a_dossier_another_client_created_opens_without_a_build(world, page):
+    """A dossier that appeared after this browser read the list opens; no build starts."""
+    sign_in(page)
+    page.goto("/")
+    expect(page.get_by_test_id("empty-dossiers")).to_be_visible()
+    other = build(world, ACME)                      # another client, meanwhile
+    page.get_by_test_id("research-domain").fill(ACME)
+    page.get_by_test_id("research-submit").click()
+    page.wait_for_url(f"**/dossiers/{ACME}")
+    expect(page.get_by_test_id("dossier-state")).to_have_text("ready")
+    assert world.get(f"/dossiers/{ACME}").json()["spent_units"] == other["spent_units"]
+
+
+def test_a_refresh_beside_another_clients_build_follows_it_to_the_end(world, page):
+    """A refresh sent while a build runs is answered 202 and the screen polls to ready."""
+    build(world)
+    sign_in(page)
+    page.goto(f"/dossiers/{ACME}")
+    expect(page.get_by_test_id("dossier-state")).to_have_text("ready")
+    fakeweb.DELAY = 0.3                              # make the next build visible to a reader
+    world.post(f"/dossiers/{ACME}/refresh", headers={"Idempotency-Key": key()})
+    page.get_by_test_id("dossier-refresh").click()
+    expect(page.get_by_test_id("dossier-state")).to_have_text("ready", timeout=30_000)
+    expect(page.get_by_test_id("dossier-spent")).to_be_visible()
+
+
+def test_signing_out_returns_to_the_login_screen(world, page):
+    """After logout a signed-in route asks for a sign-in."""
+    sign_in(page)
+    page.get_by_test_id("logout-button").click()
+    page.wait_for_url("**/login")
+    page.goto("/")
+    page.wait_for_url("**/login?next=*")
+    expect(page.get_by_test_id("login-submit")).to_be_visible()
+
+
+def test_contested_items_are_ordered_by_domain_then_field(world, page):
+    """The contested list follows domain ascending, then the field table's order."""
+    for domain in ("rival-works.test", ACME):
+        body = build(world, domain)
+        assert any(field["status"] == "contested" for field in body["fields"].values()), domain
+    sign_in(page)
+    page.goto("/contested")
+    expect(page.locator("[data-testid^=contested-item-]").first).to_be_visible()
+    names = page.eval_on_selector_all(
+        "[data-testid^=contested-item-]",
+        "els => els.map(e => e.getAttribute('data-testid'))")
+    assert names == [f"contested-item-{ACME}-hq_city", f"contested-item-{ACME}-ceo",
+                     "contested-item-rival-works.test-founded_year"]
