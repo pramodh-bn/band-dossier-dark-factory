@@ -8,7 +8,7 @@ otherwise.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
 
 from . import evidence
@@ -18,6 +18,7 @@ KINDS = ("own", "filing", "news", "aggregator")
 AUTHORITY = {"own": 2, "filing": 2, "news": 1, "aggregator": 0, None: 0}
 TIMESTAMP = re.compile(
     r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def headers(text: str) -> dict[str, str]:
@@ -67,3 +68,21 @@ def published_of(text: str) -> str | None:
 def metadata(text: str, url: str, domain: str) -> dict:
     """The kind and publication time a candidate carries for this page."""
     return {"kind": kind_of(text, url, domain), "published_at": published_of(text)}
+
+
+def true_from(text: str) -> str | None:
+    """The date from which the page says its facts hold (§3, Two times per value).
+
+    A valid `Effective: <YYYY-MM-DD>` line wins; otherwise the date part, in UTC, of
+    the page's `published_at`; with neither, there is no date.
+    """
+    stated = headers(text).get("effective", "").strip()
+    if DATE.fullmatch(stated):
+        try:
+            return date.fromisoformat(stated).isoformat()
+        except ValueError:
+            pass
+    published = published_of(text)
+    if published is None:
+        return None
+    return datetime.fromisoformat(published).astimezone(timezone.utc).date().isoformat()

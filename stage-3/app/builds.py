@@ -18,7 +18,8 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 
-from . import candidates, evidence, pages, providers
+from . import evidence, pages, providers
+from . import pages as pages_module
 from .domain import company_name
 
 BUDGET_UNITS = 80
@@ -149,16 +150,30 @@ class Builder:
             for url in page_priority(found + cited, snippets, cited, domain)[:max(slots, 0)]:
                 pool.submit(gather, url)
 
-        rows = {name: [] for name in evidence.FIELDS}
+        pages: dict[str, dict] = {}
         for url in sorted(page_text):
             text = page_text[url]
-            meta = pages.metadata(text, url, domain)
+            meta = pages_module.metadata(text, url, domain)
+            date = pages_module.true_from(text)
+            found: list[dict] = []
             for name, pairs in evidence.page_values(text, domain).items():
                 for value, excerpt in pairs:
-                    rows[name].append({"value": value, "url": url, "excerpt": excerpt,
-                                       "provider": providers.PROVIDER,
-                                       "kind": meta["kind"],
-                                       "published_at": meta["published_at"],
-                                       "retrieved_at": when, "selected": False})
-        fields = {name: candidates.field(rows[name]) for name in evidence.FIELDS}
-        self.store.finish_build(dossier, generation, calls.succeeded, fields, when)
+                    found.append({"field": name, "value": value, "url": url,
+                                  "excerpt": excerpt, "provider": providers.PROVIDER,
+                                  "kind": meta["kind"],
+                                  "published_at": meta["published_at"],
+                                  "retrieved_at": when, "true_from": date,
+                                  "learned_at": None, "selected": False})
+            for title, pairs in evidence.page_executives(text, domain).items():
+                for value, excerpt in pairs:
+                    found.append({"field": "executives", "title": title, "value": value,
+                                  "url": url, "excerpt": excerpt,
+                                  "provider": providers.PROVIDER,
+                                  "kind": meta["kind"],
+                                  "published_at": meta["published_at"],
+                                  "retrieved_at": when, "true_from": date,
+                                  "learned_at": None, "selected": False})
+            if found:
+                pages[url] = {"true_from": date, "candidates": found}
+        self.store.finish_build(dossier, generation, calls.succeeded, pages, when,
+                                budget.spent)

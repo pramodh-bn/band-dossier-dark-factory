@@ -1,8 +1,14 @@
-"""Candidates and the selection rule (§2, "Candidates", "The selection rule", "Status").
+"""Candidates, the selection rule, and the executives field (§2, §3).
 
-A candidate is one value for one field, supported by one excerpt of one page.
-Ranking is total and deterministic -- authority, then recency, then URL, then
-provider, then value -- so the same candidates always select the same value.
+A candidate is one value for one field, supported by one excerpt of one page. From
+stage 3 it also carries `true_from` (the date the evidence says the value holds)
+and `learned_at` (when this service first had it). Ranking is total and
+deterministic -- authority, then recency, then URL, then provider, then value --
+so the same candidates always select the same value.
+
+`executives` is a field of its own: its candidates are per title, each title is
+ranked separately, and its value lists the selected person of each title in the
+order cfo, coo, cto.
 """
 from __future__ import annotations
 
@@ -11,8 +17,12 @@ from .pages import AUTHORITY, KINDS, instant
 PROVIDERS = ("nimble", "tavily", "kernel", "browserbase")
 PROVIDER_ORDER = {name: index for index, name in enumerate(PROVIDERS)}
 FIELDS = ("legal_name", "hq_city", "ceo", "founded_year", "headcount_range", "funding_total")
+TITLES = ("cfo", "coo", "cto")
+EXECUTIVES = "executives"
+ALL_FIELDS = FIELDS + (EXECUTIVES,)
 CANDIDATE_KEYS = ("value", "url", "excerpt", "provider", "kind", "published_at",
-                  "retrieved_at", "selected")
+                  "retrieved_at", "true_from", "learned_at", "selected")
+EXECUTIVE_KEYS = CANDIDATE_KEYS + ("title",)
 
 
 def canonical(value):
@@ -34,11 +44,7 @@ def _value_key(value) -> tuple:
 
 
 def _published_key(published_at) -> tuple:
-    """Sort key for recency: a later time first, and no time last.
-
-    Times are compared as parsed instants, because two RFC 3339 strings with
-    different offsets can name the same moment.
-    """
+    """Sort key for recency: a later time first, and no time last."""
     if published_at is None:
         return (1, 0.0)
     from datetime import datetime  # noqa: PLC0415 - only needed when a time exists
@@ -82,17 +88,23 @@ def dedupe(candidates: list[dict]) -> list[dict]:
     return kept
 
 
+def _citation(candidate: dict) -> dict:
+    """The `url`, `excerpt` and `provider` of a candidate."""
+    return {"url": candidate["url"], "excerpt": candidate["excerpt"],
+            "provider": candidate["provider"]}
+
+
 def field(candidates: list[dict]) -> dict:
     """A field's value, status, citations and ordered candidates from its candidates."""
     prepared = [{**candidate, "value": canonical(candidate.get("value"))}
                 for candidate in candidates]
     ordered = sorted(dedupe(prepared), key=rank_key)
     if not ordered:
-        return {"value": None, "status": "unknown", "citations": [], "candidates": []}
+        return {"value": None, "status": "unknown", "citations": [], "candidates": [],
+                "true_from": None, "learned_at": None}
     selected = ordered[0]["value"]
-    citations = [{"url": candidate["url"], "excerpt": candidate["excerpt"],
-                  "provider": candidate["provider"]}
-                 for candidate in ordered if same_value(candidate["value"], selected)]
+    citations = [_citation(candidate) for candidate in ordered
+                 if same_value(candidate["value"], selected)]
     return {
         "value": selected,
         "status": "known" if len(distinct(ordered)) == 1 else "contested",
@@ -100,6 +112,39 @@ def field(candidates: list[dict]) -> dict:
         "candidates": [{**{key: candidate.get(key) for key in CANDIDATE_KEYS},
                         "selected": index == 0}
                        for index, candidate in enumerate(ordered)],
+        "true_from": ordered[0].get("true_from"),
+        "learned_at": ordered[0].get("learned_at"),
+    }
+
+
+def executives_field(candidates: list[dict]) -> dict:
+    """The executives field: each title ranked on its own, members in cfo, coo, cto order."""
+    prepared = [{**candidate, "value": canonical(candidate.get("value"))}
+                for candidate in candidates]
+    ranked = {title: sorted(dedupe([candidate for candidate in prepared
+                                    if candidate.get("title") == title]), key=rank_key)
+              for title in TITLES}
+    members = [{"title": title, "name": ranked[title][0]["value"]}
+               for title in TITLES if ranked[title]]
+    ordered = [candidate for title in TITLES for candidate in ranked[title]]
+    if not members:
+        return {"value": None, "status": "unknown", "citations": [], "candidates": [],
+                "true_from": None, "learned_at": None}
+    citations = [_citation(candidate) for member in members
+                 for candidate in ranked[member["title"]]
+                 if same_value(candidate["value"], member["name"])]
+    contested = any(len(distinct(ranked[title])) > 1 for title in TITLES)
+    member_dates = [ranked[member["title"]][0].get("true_from") for member in members]
+    true_from = None if any(date is None for date in member_dates) else max(member_dates)
+    return {
+        "value": members,
+        "status": "contested" if contested else "known",
+        "citations": citations,
+        "candidates": [{**{key: candidate.get(key) for key in EXECUTIVE_KEYS},
+                        "selected": candidate is ranked[candidate["title"]][0]}
+                       for candidate in ordered],
+        "true_from": true_from,
+        "learned_at": ordered[0].get("learned_at"),
     }
 
 
@@ -139,5 +184,6 @@ def candidates_from_citations(value, citations: list[dict], retrieved_at, kind=N
                      "kind": legacy_kind(citation.get("kind")) or kind,
                      "published_at": legacy_published(citation.get("published_at"))
                      or published_at,
-                     "retrieved_at": retrieved_at, "selected": False})
+                     "retrieved_at": retrieved_at, "true_from": None,
+                     "learned_at": retrieved_at, "selected": False})
     return made

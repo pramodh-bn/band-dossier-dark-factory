@@ -22,6 +22,16 @@ FIELDS = (
 
 STRING_FIELDS = ("legal_name", "hq_city", "ceo")
 
+#: The executives field's titles, in the order a value lists them (§3, Executives).
+TITLES = ("cfo", "coo", "cto")
+
+#: Each title is a field of its own for Appendix A, with the ceo format and these phrases.
+TITLE_PHRASES = {
+    "cfo": ("chief financial officer", "CFO"),
+    "coo": ("chief operating officer", "COO"),
+    "cto": ("chief technology officer", "CTO"),
+}
+
 # A.3: the statement phrase each field needs.
 STATEMENT_PHRASES = {
     "legal_name": (
@@ -575,6 +585,34 @@ def _differs(one, other) -> bool:
     return one != other
 
 
+def executive_values(sentence: str, title: str, domain: str) -> list[str]:
+    """Every person name the sentence states for `title` (ceo's format, the title's phrases)."""
+    removed = list(phrase_spans(sentence, (domain, company_name(domain))))
+    removed += phrase_spans(sentence, TITLE_PHRASES[title])
+    text = _without_spans(sentence, removed)
+    return [text[start:end].strip() for start, end, words in _runs(text, " ")
+            if 2 <= words <= 3]
+
+
+def supported_executive(sentence: str, title: str, domain: str):
+    """The one person `sentence` names for `title`, or None (A.2 with the title's phrases)."""
+    if not sentence or len(sentence) > 20_000:
+        return None
+    if not names_company(sentence, domain):
+        return None
+    if not phrase_spans(sentence, TITLE_PHRASES[title]):
+        return None
+    if has_negation(sentence):
+        return None
+    values = executive_values(sentence, title, domain)
+    if not values:
+        return None
+    first = values[0]
+    if any(_differs(value, first) for value in values[1:]):
+        return None
+    return first
+
+
 def _value_text(sentence: str, field: str, value, domain: str) -> str:
     """The value as the sentence writes it, for finding an excerpt window."""
     if field in STRING_FIELDS and isinstance(value, str):
@@ -645,4 +683,21 @@ def page_values(text: str, domain: str) -> dict[str, list[tuple[object, str]]]:
             if excerpt is None:
                 continue
             found.setdefault(field, []).append((value, excerpt))
+    return found
+
+
+def page_executives(text: str, domain: str) -> dict[str, list[tuple[str, str]]]:
+    """{title: [(name, excerpt)]} for every executive `text`'s prose names (§3, Executives)."""
+    found: dict[str, list[tuple[str, str]]] = {}
+    for sentence in sentences(prose_of(text)):
+        if not sentence:
+            continue
+        for title in TITLES:
+            value = supported_executive(sentence, title, domain)
+            if value is None:
+                continue
+            excerpt = " ".join(sentence.split())
+            if len(excerpt) > MAX_EXCERPT:
+                continue
+            found.setdefault(title, []).append((value, excerpt))
     return found

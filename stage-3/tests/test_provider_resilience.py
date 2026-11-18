@@ -13,11 +13,13 @@ import pytest
 
 import fakeweb
 from app import builds, providers
-from conftest import wait_ready
+from conftest import FIELDS, wait_ready
 
 ACME = "acme-robotics.test"
 EXPECTED = {"legal_name": "Acme Robotics, Inc.", "hq_city": "Lisbon", "ceo": "Dana Ruiz",
-            "founded_year": 2014, "headcount_range": "51-200", "funding_total": 12_000_000}
+            "founded_year": 2014, "headcount_range": "51-200", "funding_total": 12_000_000,
+            "executives": [{"title": "cfo", "name": "Dana Ruiz"},
+                           {"title": "cto", "name": "Ben Okafor"}]}
 
 
 def key() -> str:
@@ -45,7 +47,8 @@ def test_throttled_first_attempts_still_build_the_same_dossier(world):
     body = build(world)
     assert body["state"] == "ready"
     assert {name: field["value"] for name, field in body["fields"].items()} == EXPECTED
-    for name, field in body["fields"].items():
+    for name in FIELDS:
+        field = body["fields"][name]
         assert field["status"] in ("known", "contested") and field["citations"], name
     refused = [entry for entry in fakeweb.LOG if entry["status"] == 429]
     assert refused and all(entry["cost"] == 0 for entry in refused)

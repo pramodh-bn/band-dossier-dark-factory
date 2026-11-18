@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import socketserver
 import sys
@@ -98,8 +99,13 @@ def browser_page(path: str) -> str | None:
 class Application:
     """The service's state and the build runner, and every route over them."""
 
-    def __init__(self) -> None:
-        self.store = state.Store()
+    def __init__(self, state_path: str | None = None) -> None:
+        path = state_path or os.environ.get("STATE_PATH", "/data/state.json")
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        except OSError:
+            path = None
+        self.store = state.Store(path)
         self.builder = Builder(self.store)
 
     # -- routing -----------------------------------------------------------
@@ -143,7 +149,27 @@ class Application:
         if len(segments) == 2 and segments[0] == "dossiers" and method == "GET":
             self.authenticate(headers)
             domain = path_domain(segments[1])
+            as_of = _first(query, "as_of", None)
+            if as_of is not None:
+                return 200, self.store.view_as_of(domain, as_of)
             return 200, self.store.view(domain)
+        if len(segments) == 3 and segments[0] == "dossiers" and segments[2] == "values" \
+                and method == "GET":
+            self.authenticate(headers)
+            domain = path_domain(segments[1])
+            true_at = _first(query, "true_at", None)
+            if true_at is None:
+                raise errors.validation("true_at is required")
+            return 200, self.store.values_at(domain, true_at, _first(query, "as_of", None))
+        if len(segments) == 3 and segments[0] == "dossiers" and segments[2] == "history" \
+                and method == "GET":
+            self.authenticate(headers)
+            return 200, self.store.history_view(path_domain(segments[1]))
+        if segments == ["changes"] and method == "GET":
+            self.authenticate(headers)
+            since = _paging_value(query, "since", 0, 0, None)
+            limit = _paging_value(query, "limit", DEFAULT_LIMIT, 1, MAX_LIMIT)
+            return 200, self.store.changes(since, limit)
         if len(segments) == 3 and segments[0] == "dossiers" and segments[2] == "refresh" \
                 and method == "POST":
             user = self.authenticate(headers)

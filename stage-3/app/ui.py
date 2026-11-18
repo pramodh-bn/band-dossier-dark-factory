@@ -409,6 +409,27 @@ function citationsHtml(field, name) {
   return `<div class="cites" data-testid="field-citations-${name}">${body}</div>`;
 }
 
+function executivesHtml(body) {
+  const field = (body.fields || {}).executives;
+  if (!field) return "";
+  const members = field.value || [];
+  const rows = members.length
+    ? members.map((member) => `<li><strong>${escapeHtml(member.name)}</strong>
+        <span class="muted small">${escapeHtml(member.title.toUpperCase())}</span></li>`).join("")
+    : `<li class="muted">No executive is established by the evidence yet.</li>`;
+  const cites = (field.citations || []).map((cite) => `
+    <blockquote class="cite">${escapeHtml(cite.excerpt)}
+      <div class="cite-foot"><span class="pill kind">${escapeHtml(cite.provider)}</span>
+        <a href="${escapeHtml(cite.url)}" rel="noopener noreferrer" target="_blank">Open source</a>
+      </div></blockquote>`).join("");
+  return `<section class="card" style="margin-top:16px" aria-label="Executives">
+    <div class="field-head"><h2 style="margin:0">Executives</h2>
+      <span class="pill ${escapeHtml(field.status)}">${escapeHtml(field.status)}</span></div>
+    <ul class="list" style="margin-top:10px">${rows}</ul>
+    ${cites ? `<div class="cites" style="margin-top:10px">${cites}</div>` : ""}
+  </section>`;
+}
+
 function fieldsHtml(body) {
   return `<div class="fields">` + FIELDS.map((name) => {
     const field = (body.fields || {})[name] || {value: null, status: "unknown", citations: []};
@@ -483,7 +504,7 @@ async function renderDossier(domain) {
       </div>
     </div>
     <div id="dossier-notes" class="stack" style="margin:16px 0"></div>
-    <div id="dossier-body">${body.state === "building" ? buildingNotice(body) : fieldsHtml(body)}</div>`;
+    <div id="dossier-body">${body.state === "building" ? buildingNotice(body) : fieldsHtml(body) + executivesHtml(body)}</div>`;
   const notes = document.getElementById("dossier-notes");
   if (pendingRefresh && pendingRefresh.uncertain && pendingRefresh.domain === body.domain) {
     notes.innerHTML = notice("refresh-uncertain",

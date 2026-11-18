@@ -26,17 +26,19 @@ def free_port() -> int:
 
 
 @pytest.fixture(scope="session")
-def service():
+def service(tmp_path_factory):
     """A running service whose builds answer from `fakeweb`; yields its base URL.
 
     Session-scoped: starting a server costs a second on a slow resolver, and every
     check that cares about state resets it first. The fake's own state is cleared
-    before each check.
+    before each check. The service persists to a session temp file, as the delivered
+    image persists to its container filesystem.
     """
     original = providers.Calls
     providers.Calls = fakeweb.FakeCalls
+    state_path = str(tmp_path_factory.mktemp("state") / "state.json")
     port = free_port()
-    application = app_server.Application()
+    application = app_server.Application(state_path=state_path)
     handler = type("BoundHandler", (app_server.Handler,), {"app": application})
     httpd = app_server.Server(("127.0.0.1", port), handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

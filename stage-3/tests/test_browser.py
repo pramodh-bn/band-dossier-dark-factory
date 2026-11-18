@@ -400,5 +400,5 @@ def test_contested_items_are_ordered_by_domain_then_field(world, page):
     names = page.eval_on_selector_all(
         "[data-testid^=contested-item-]",
         "els => els.map(e => e.getAttribute('data-testid'))")
-    assert names == [f"contested-item-{ACME}-hq_city", f"contested-item-{ACME}-ceo",
+    assert names == [f"contested-item-{ACME}-ceo",
                      "contested-item-rival-works.test-founded_year"]

@@ -35,7 +35,8 @@ def build(client, domain: str) -> dict:
 
 def browser_texts(domain: str) -> dict[str, str]:
     """Every page of the fake company, as {url: browser text}."""
-    return {url: page.text(render=True) for url, page in fakeweb.PAGES[domain].items()}
+    return {url: page.text(render=True)
+            for url, page in fakeweb.served_pages(domain).items()}
 
 
 def expected_candidates(domain: str, urls=None) -> dict[str, set]:
@@ -68,8 +69,9 @@ def assert_no_missing(body: dict, expected: dict[str, set]) -> None:
 
 
 def research_urls(domain: str) -> list[str]:
-    """The pages a research run for `domain` cites."""
-    return [url for _, _, url, _ in fakeweb.RESEARCH.get(domain, [])]
+    """The pages a research run for `domain` cites in the current epoch."""
+    claims = fakeweb.RESEARCH.get(domain, {}).get(str(fakeweb.EPOCH), [])
+    return [url for _, _, url, _ in claims]
 
 
 def read_urls() -> set[str]:
@@ -94,7 +96,7 @@ def test_a_large_company_keeps_both_search_and_research_candidates(world):
 
 def test_a_stale_served_text_never_becomes_a_candidate(world):
     """The page's served text names a different chief executive; only the browser value counts."""
-    served = fakeweb.PAGES[WIDE]["https://wide-works.test/stale"].served
+    served = fakeweb.page_at(WIDE, "https://wide-works.test/stale").served
     assert evidence.page_values(served, WIDE)["ceo"][0][0] == "Stale Person"
     body = build(world, WIDE)
     values = {candidate["value"] for candidate in body["fields"]["ceo"]["candidates"]}
@@ -137,7 +139,7 @@ def test_no_candidate_comes_from_a_page_the_build_did_not_read(world):
     assert body["spent_units"] == fakeweb.spent() == 10 + 25
     for name, field in body["fields"].items():
         assert field == {"value": None, "status": "unknown", "citations": [],
-                         "candidates": []}, name
+                         "candidates": [], "true_from": None, "learned_at": None}, name
 
 
 def test_every_candidate_matches_the_page_it_cites(world):
@@ -145,7 +147,7 @@ def test_every_candidate_matches_the_page_it_cites(world):
     body = build(world, WIDE)
     for name, field in body["fields"].items():
         for candidate in field["candidates"]:
-            page = fakeweb.PAGES[WIDE][candidate["url"]]
+            page = fakeweb.page_at(WIDE, candidate["url"])
             header = pages.metadata(page.text(render=True), candidate["url"], WIDE)
             assert (candidate["kind"], candidate["published_at"]) == \
                 (header["kind"], header["published_at"]), (name, candidate)

@@ -1,76 +1,77 @@
-# Dossier — Stage 2
+# Dossier — Stage 3
 
 A containerised HTTP service and browser product that researches a company by its
-web domain and keeps a dossier of six fields. Each field keeps **every** value its
-evidence supports as a candidate, and selects one by a fixed rule: the company's
-own site and filings first, then news, then aggregators; within an authority, the
-later publication; then the smaller URL, the earlier provider, the smaller value.
+web domain. Each of the seven fields keeps every value its evidence supports as a
+candidate, selects one by a fixed rule, and records the history of that selection:
+when the value became true (`true_from`), when this service learned it
+(`learned_at`), and every change in a feed. A dossier answers as it stood at an
+earlier time, and the whole state survives an abrupt restart.
 
 ## Build and run
 
 From this folder:
 
 ```sh
-docker build -t dossier-stage2 .
+docker build -t dossier-stage3 .
 docker run --rm -p 8080:8080 -e PORT=8080 \
   -e NIMBLE_API_KEY="<your nimble key>" \
-  dossier-stage2
+  dossier-stage3
 ```
 
 `PORT` is the only setting the service needs; it listens on `0.0.0.0:$PORT`
-(default `8080`). `NIMBLE_API_KEY` is the provider credential. `NIMBLE_BASE_URL`
-may point the Nimble SDK at another endpoint; unset uses Nimble's own. Every
-provider call goes through WebRouter's `nimble` backend — searches, extracts
-(including the rendered extract that gives a page's browser text) and research
-runs — so a build works with Nimble alone. The optional `kernel`/`browserbase`
-variables are accepted but not needed: the rendered extract supplies every
-graded page's browser text.
+(default `8080`). `NIMBLE_API_KEY` is the provider credential; `NIMBLE_BASE_URL`
+may point the Nimble SDK elsewhere. Every provider call goes through WebRouter's
+`nimble` backend — searches, rendered extracts and research runs — so a build
+works with Nimble alone.
 
-Open `http://localhost:8080/` in a browser, create an account, and research a
-domain. The API is the same origin: `GET /health`, `/auth/*`, `/dossiers*`,
-`/_test/*`.
+State is written to `STATE_PATH` (default `/data/state.json`) after every
+mutation, atomically (temp file, fsync, rename). The image creates `/data`, so a
+`docker stop`/`docker start` or a `docker kill` followed by `docker start` of the
+same container answers exactly as before the stop. Mount a volume at `/data` to
+keep it across `docker rm`.
 
-## Screens
+## The API
 
-| Route | Screen |
+| Route | What it answers |
 |---|---|
-| `/` | dossier list with search and the research form |
-| `/dossiers/{domain}` | one dossier: state, spending, six fields with values, statuses and citations, refresh and reload |
-| `/dossiers/{domain}/evidence` | every candidate of every field, ranked |
-| `/contested` | every contested field across all dossiers |
-| `/signup`, `/login` | account screens |
+| `GET /health` | `{"status": "ok"}` |
+| `POST /auth/signup`, `POST /auth/login` | accounts and bearer tokens |
+| `POST /dossiers`, `GET /dossiers` | start a build, list dossiers |
+| `GET /dossiers/{domain}` | the dossier now, or `?as_of=<RFC 3339>` as it stood then |
+| `GET /dossiers/{domain}/values?true_at=<YYYY-MM-DD>[&as_of=…]` | what the evidence held on that date |
+| `GET /dossiers/{domain}/history` | every field's selected values, oldest first |
+| `GET /changes?since=&limit=` | the change feed, `seq` ascending |
+| `POST /dossiers/{domain}/refresh` | start a new build |
+| `GET /_test/export`, `POST /_test/import` | move the whole state between processes |
 
-`/dossiers/{domain}` is shared: `Accept: text/html` returns the browser document,
-anything else the JSON API. The other screens are browser routes that read that
-same API with a bearer token held in `localStorage`.
+`/dossiers/{domain}` is shared with the browser: `Accept: text/html` returns the
+document, anything else the JSON API.
 
-While a dossier is `building`, its screen re-reads it every 1.5 s until it is
-`ready` or `failed`; a later read always wins over an earlier one still in
-flight. A research or refresh whose response is lost shows an *uncertain* notice
-and stays retryable with the same idempotency key and body, so a retry replays
-the first response instead of starting a second build.
+## Fields, candidates and the two times
 
-## Candidates and cost
+The six fields of stage 1 plus `executives`, whose value lists the selected
+`{title, name}` of `cfo`, `coo` and `cto` in that order. Each title is ranked on
+its own by the stage-2 rule (authority, recency, URL, provider, value).
 
-A build makes ten lite searches (the first exactly the domain; together they reach
-every page the corpus serves for a company), one Nimble research run over all six
-fields (25 units), and then reads pages as browser text — the text a browser shows
-once the page has loaded, 3 units a URL. Reading is what makes evidence, so the
-80-unit budget picks the pages: the pages research cites come first (their values
-exist nowhere else), then the company's own pages, then pages whose search snippet
-carries a field's statement vocabulary, then the rest by URL. The prefix the
-budget affords is fixed before anything is sent, so the same build reads the same
-pages every time. A page's text, and only a page's text, supplies candidates: a
-research snippet never stands in for a page the build did not read, so no
-candidate ever carries a kind or publication time that was guessed.
+Every candidate carries `true_from` (the page's `Effective` date, else the UTC
+date of its `Published` time, else null) and `learned_at` (the first build that
+gathered that field, value, URL and provider). A selected value's `true_from` is
+its candidate's; its `learned_at` is the build that made it selected.
 
-`spent_units` equals the provider's own cost log exactly; a refused call costs
-nothing and is retried with a bounded backoff (429 and transient 5xx), each attempt
-charged to the same cap.
+A ready build appends one history entry per field whose selected value moved:
+`initial` for the first value, `correction` when the new value's `true_from` is on
+or before the old one, `change` otherwise. Every `change` and `correction` also
+appears once in the feed, numbered in the §4 field order then `executives`.
 
-A page's `Kind` and `Published` header lines give each candidate its `kind` and
-`published_at`; a page without a usable `Kind` is `own` on the company's domain
-and `aggregator` elsewhere.
+## Cost
+
+Ten lite searches (the first exactly the domain), one research run (25 units), then
+rendered extracts (3 units a URL) in priority order — research-cited pages, the
+company's own pages, pages whose search snippet carries field vocabulary, then the
+rest — up to what the remaining 80-unit budget affords. The prefix is fixed before
+anything is sent, so a build reads the same pages every time. `spent_units` equals
+the provider's own cost log; refused calls cost nothing and are retried with a
+bounded backoff.
 
 ## Layout
 
@@ -78,13 +79,13 @@ and `aggregator` elsewhere.
 |---|---|
 | `app/server.py` | routing, validation, authentication, idempotency, content negotiation |
 | `app/ui.py` | the browser document: markup, styles and the client app |
-| `app/store.py` | state: clock, accounts, tokens, dossiers, exports, upgrades |
-| `app/evidence.py` | Appendix A: when an excerpt supports a value |
-| `app/pages.py` | page kind and publication time |
-| `app/candidates.py` | the selection rule, statuses and citations |
-| `app/builds.py` | one background build: searches, rendered extracts, research, the 80-unit budget |
+| `app/store.py` | state, builds, page versions, history, feed, persistence, upgrades |
+| `app/evidence.py` | Appendix A, including the executives titles |
+| `app/pages.py` | page kind, publication time and `true_from` |
+| `app/candidates.py` | the selection rule, statuses, citations and the executives field |
+| `app/builds.py` | one background build: searches, research, rendered extracts, the budget |
 | `app/providers.py` | every provider call, through WebRouter's `nimble` backend |
-| `tests/` | unit, API, migration and Playwright browser tests, plus the corpus checks |
+| `tests/` | unit, API, temporal, concurrency, restart, upgrade and Playwright tests |
 
 ## Tests
 
@@ -95,43 +96,28 @@ python -m pytest tests -q
 ```
 
 The corpus checks replay the build's gathering offline against a corpus set's
-`key.json` (the organizers' own reading of Appendix A and of the selection rule):
+`key.json`:
 
 ```sh
 python -m tests.validate_corpus --corpus <set> --challenge <dossier challenge dir>
 python -m tests.validate_candidates --corpus <set> --challenge <dossier challenge dir>
 ```
 
-`tests/test_browser.py` drives the real document with Playwright at a 375 px and a
-desktop viewport; `tests/test_migration.py` imports a Stage 1 export and checks the
-candidates it becomes.
+## Upgrades
 
-Screens at both widths are in `screenshots/`.
+`POST /_test/import` accepts this team's stage-1, stage-2 and stage-3 exports.
 
-## Upgrading from Stage 1
+- **Stage 3** exports round-trip everything: builds, page versions, history, the
+  feed and its sequence, so `?as_of=` and `/values` answer as they did.
+- **Stage 2** exports keep the current candidates as one synthetic ready build at
+  the dossier's `researched_at`, with one `initial` history entry per valued field
+  and an empty feed. The stage-2 service did not export its earlier builds, so
+  those are irrecoverable; the synthetic build is the strongest recoverable
+  history.
+- **Stage 1** exports become candidates from their citations, learned at their
+  retrieval time, in the same synthetic build.
 
-`POST /_test/import` accepts this team's Stage 1 export unchanged. For every
-non-null field, each stored citation becomes one imported candidate: the field's
-value, that citation's URL, excerpt and provider are kept exactly, `retrieved_at`
-is the dossier's `researched_at`, and `kind`/`published_at` are taken from the
-legacy state when it records them and are null otherwise (null kind has
-aggregator authority). A citation repeated for the same page and value is one
-candidate. The Stage 2 selection rule then sets the field's value, status and
-citations, and the next ready build replaces the imported candidates. Accounts,
-tokens, dossier ids, idempotent responses and the clock are preserved, so a
-signed-in browser stays signed in and a lost write still replays.
-
-**Known limitation.** A Stage 1 export keeps the values it selected and the
-excerpts that supported them, not the gathered page texts. Evidence Stage 1
-gathered but never cited cannot be recovered from the export, and import makes no
-provider call (§10), so an imported field has candidates only for the citations
-it carries — it cannot be `contested` from evidence the export does not name. The
-next completed build is the point at which full evidence returns.
-
-**Known limitation — the 80-unit cap.** Ten searches and the research run cost 35
-units, leaving 15 rendered pages. The priority order above puts every page that
-can state a value first — the cited pages, the company's own pages, and pages
-whose snippet carries field vocabulary — and on the sample and graded corpora
-that set is at most twelve pages, so every supported candidate from both sources
-is kept. A company with more than fifteen such pages would lose the tail of the
-queue; no corpus set in this challenge has one, and the cap behaviour is tested.
+Accounts, tokens, dossier ids, spending and completed idempotent responses survive
+every import. An imported dossier has no `executives` candidates, so that field is
+`unknown` until a build supplies it; the first build after an import compares its
+values with the imported ones and records `change` entries where they moved.
