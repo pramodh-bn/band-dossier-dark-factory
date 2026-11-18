@@ -170,8 +170,9 @@ class StoredResponse:
 class SharedBudget:
     """A batch's budget, shared by every build the batch started (§4, Batches).
 
-    Reserving and refunding take the store's lock, so concurrent builds can never
-    take the batch's spending over its `budget_units`.
+    Reserving capacity takes the store's lock, so concurrent builds can never take
+    the batch's spending over its `budget_units`. A reservation becomes counted
+    spend in the same critical section that journals it.
     """
 
     def __init__(self, store: "Store", batch: "Batch") -> None:
@@ -179,17 +180,18 @@ class SharedBudget:
         self.batch = batch
 
     def reserve(self, units: int) -> bool:
-        """Claim `units` of the batch's budget, or False when they would go over it."""
-        with self.store.lock:
-            if self.batch.spent_units + units > self.batch.budget_units:
-                return False
-            self.batch.spent_units += units
-            return True
+        """Reserve `units` of the batch's budget, or False when they would go over it.
 
-    def refund(self, units: int) -> None:
-        """Give back the units of a call the provider refused."""
+        The reservation is capacity only. It becomes counted spend in the same
+        state-lock critical section that appends the journal record, so a snapshot
+        can never include the batch's unit without the record that accounts for it.
+        """
         with self.store.lock:
-            self.batch.spent_units = max(0, self.batch.spent_units - units)
+            if (self.batch.spent_units + self.batch.reserved_units + units
+                    > self.batch.budget_units):
+                return False
+            self.batch.reserved_units += units
+            return True
 
 
 @dataclass
@@ -202,6 +204,8 @@ class Batch:
     domains: list = field(default_factory=list)
     spent_units: int = 0
     pending: int = 0
+    #: Capacity claimed by calls not yet checkpointed (in memory; never exported).
+    reserved_units: int = 0
 
     def state_dict(self) -> dict:
         """The batch as the state file stores it."""
@@ -242,6 +246,8 @@ class Store:  # pylint: disable=too-many-instance-attributes
         self._dossier_seq = 0
         self._key_locks: dict[tuple[str, str], threading.Lock] = {}
         self._persist_lock = threading.Lock()
+        self._journal_lock = threading.Lock()
+        self._journal_seq = 0
         if path:
             self.load()
 
@@ -250,43 +256,126 @@ class Store:  # pylint: disable=too-many-instance-attributes
     def persist(self) -> None:
         """Write the whole state to the state file, atomically, when one is configured.
 
-        The snapshot is taken and written under the state lock, so the file always
-        matches the state a reader has just seen; the write itself is serialised by
-        its own lock so two writers never interleave.
+        The snapshot is taken under the state lock (quickly) and written and fsynced
+        outside it, so a burst of checkpointed spend cannot block readers for the
+        length of a disk write. Persists are serialised by their own lock, and the
+        journal is truncated only when no record newer than the snapshot exists.
         """
         if not self.path:
             return
-        with self.lock:
-            with self._persist_lock:
-                body = json.dumps(self.export_state(durable=True), ensure_ascii=False)
-                directory = os.path.dirname(os.path.abspath(self.path)) or "."
+        with self._persist_lock:
+            with self.lock:
+                state = self.export_state(durable=True)
+                saved_seq = self._journal_seq
+            body = json.dumps(state, ensure_ascii=False)
+            directory = os.path.dirname(os.path.abspath(self.path)) or "."
+            try:
+                os.makedirs(directory, exist_ok=True)
+                handle, temporary = tempfile.mkstemp(dir=directory, prefix=".state-",
+                                                     suffix=".json")
+            except OSError as exc:
+                print(f"dossier: cannot persist state ({exc})", file=sys.stderr, flush=True)
+                return
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, self.path)
                 try:
-                    os.makedirs(directory, exist_ok=True)
-                    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".state-",
-                                                         suffix=".json")
-                except OSError as exc:
-                    print(f"dossier: cannot persist state ({exc})", file=sys.stderr, flush=True)
-                    return
+                    folder = os.open(directory, os.O_RDONLY)
+                    try:
+                        os.fsync(folder)
+                    finally:
+                        os.close(folder)
+                except OSError:
+                    pass
+            except OSError as exc:
+                print(f"dossier: cannot persist state ({exc})", file=sys.stderr, flush=True)
                 try:
-                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                        stream.write(body)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(temporary, self.path)
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                return
+            with self.lock:
+                if self._journal_seq == saved_seq:
+                    self._truncate_journal()
+
+    def _journal_path(self) -> str | None:
+        """The spend journal beside the state file, or None when state is in memory."""
+        return f"{self.path}.journal" if self.path else None
+
+    def _append_journal(self, record: dict) -> None:
+        """Append one spend checkpoint and fsync it, before the provider call."""
+        path = self._journal_path()
+        if path is None:
+            return
+        line = json.dumps(record, sort_keys=True) + "\n"
+        with self._journal_lock:
+            try:
+                with open(path, "a", encoding="utf-8") as stream:
+                    stream.write(line)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError as exc:
+                print(f"dossier: cannot checkpoint spend ({exc})",
+                      file=sys.stderr, flush=True)
+
+    def _truncate_journal(self) -> None:
+        """Drop checkpoint records the state file already includes."""
+        path = self._journal_path()
+        if path is None:
+            return
+        with self._journal_lock:
+            try:
+                open(path, "w", encoding="utf-8").close()
+            except OSError:
+                pass
+
+    def _replay_journal(self, base_seq: int) -> None:
+        """Apply spend checkpoints written after the state file's last snapshot.
+
+        A record carries the dossier, its build generation and signed units. It is
+        applied only to the same running job, so a stale record can never change a
+        later build's or a reset state's spend. Signed records are ordered by their
+        sequence number so a refund never floors below zero before its reservation.
+        """
+        path = self._journal_path()
+        if path is None:
+            return
+        records = []
+        try:
+            with open(path, encoding="utf-8") as stream:
+                for line in stream:
                     try:
-                        folder = os.open(directory, os.O_RDONLY)
-                        try:
-                            os.fsync(folder)
-                        finally:
-                            os.close(folder)
-                    except OSError:
-                        pass
-                except OSError as exc:
-                    print(f"dossier: cannot persist state ({exc})", file=sys.stderr, flush=True)
-                    try:
-                        os.unlink(temporary)
-                    except OSError:
-                        pass
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    seq = record.get("seq")
+                    if not isinstance(seq, int) or isinstance(seq, bool) or seq <= base_seq:
+                        continue
+                    records.append(record)
+        except OSError:
+            return
+        for record in sorted(records, key=lambda item: item["seq"]):
+            domain, generation = record.get("d"), record.get("g")
+            units = record.get("u")
+            if not isinstance(units, int) or isinstance(units, bool):
+                continue
+            dossier = self.dossiers.get(domain)
+            if dossier is None or dossier.job is None \
+                    or dossier.job.get("generation") != generation:
+                continue
+            dossier.spent_units = max(0, dossier.spent_units + units)
+            dossier.job["spent"] = max(0, dossier.job.get("spent", 0) + units)
+            batch_id = dossier.job.get("batch_id")
+            batch = self.batches.get(batch_id) if isinstance(batch_id, str) else None
+            if batch is not None:
+                batch.spent_units = min(batch.budget_units,
+                                        max(0, batch.spent_units + units))
+            self._journal_seq = max(self._journal_seq, record["seq"])
 
     def load(self) -> None:
         """Read the state file when it exists; a missing or unreadable file starts empty."""
@@ -301,6 +390,9 @@ class Store:  # pylint: disable=too-many-instance-attributes
                                                    state.get("sequences") or {}, users)
         except FixtureError:
             return
+        base_seq = state.get("journal_seq", 0)
+        if not isinstance(base_seq, int) or isinstance(base_seq, bool) or base_seq < 0:
+            return
         with self.lock:
             self._clock = parse_time(state.get("now")) if state.get("now") else self._clock
             self.users = users
@@ -313,13 +405,20 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.batches = batches
             self._user_seq, self._dossier_seq = sequences
             self._batch_seq = batch_seq
-            self._shared = {}
+            self._shared = {batch_id: SharedBudget(self, batch)
+                            for batch_id, batch in self.batches.items()}
+            jobs = {domain: copy.deepcopy(job) for domain, job
+                    in (state.get("jobs") or {}).items() if isinstance(job, dict)}
+            for domain, job in jobs.items():
+                if domain in self.dossiers:
+                    self.dossiers[domain].job = job
+            self._journal_seq = base_seq
+            self._replay_journal(base_seq)
             for dossier in self.dossiers.values():
                 _recompute_standing(dossier)
-            self._recover_jobs(state.get("jobs") or {})
-            for batch in self.batches.values():
-                self._shared[batch.batch_id] = SharedBudget(self, batch)
-        if state.get("jobs"):
+            self._recover_jobs({domain: dossier.job for domain, dossier
+                                in self.dossiers.items() if dossier.job is not None})
+        if jobs or self._journal_seq != base_seq:
             self.persist()
 
     def _recover_jobs(self, jobs: dict) -> None:
@@ -397,6 +496,7 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.batches = {}
             self._batch_seq = 0
             self._shared = {}
+            self._journal_seq = 0
             self._key_locks = {}
             self._user_seq = 0
             self._dossier_seq = 0
@@ -730,12 +830,26 @@ class Store:  # pylint: disable=too-many-instance-attributes
         """
         if not units:
             return
+        record = None
         with self.lock:
             if self.still_current(dossier, generation):
                 dossier.spent_units = max(0, dossier.spent_units + units)
                 if dossier.job is not None:
                     dossier.job["spent"] = max(0, dossier.job.get("spent", 0) + units)
-        self.persist()
+                    batch_id = dossier.job.get("batch_id")
+                    batch = self.batches.get(batch_id) if isinstance(batch_id, str) else None
+                    if batch is not None:
+                        if units > 0:
+                            batch.reserved_units = max(
+                                0, batch.reserved_units - min(units, batch.reserved_units))
+                        batch.spent_units = max(0, batch.spent_units + units)
+                    self._journal_seq += 1
+                    record = {"seq": self._journal_seq, "d": dossier.domain,
+                              "g": generation, "u": units}
+        if record is not None:
+            # A narrow append+fsync, not a whole-state snapshot: the unit is durable
+            # before the provider call without blocking readers on the state lock.
+            self._append_journal(record)
 
     def finish_build(self, dossier: Dossier, generation: int, ready: bool,
                      pages: dict, when: str, spent: int) -> None:
@@ -763,7 +877,7 @@ class Store:  # pylint: disable=too-many-instance-attributes
             if isinstance(batch_id, str) and batch_id in self.batches:
                 batch = self.batches[batch_id]
                 batch.pending = max(0, batch.pending - 1)
-            self.persist()
+        self.persist()
 
     def _fields_from_pages(self, dossier: Dossier, pages: dict, when: str) -> dict:
         """The eight fields a build's page versions support, with their two times."""
@@ -917,6 +1031,14 @@ class Store:  # pylint: disable=too-many-instance-attributes
                                  in self.dossiers.items() if dossier.job is not None}
                 state["batches"] = [batch.state_dict() for _, batch
                                     in sorted(self.batches.items())]
+                state["journal_seq"] = self._journal_seq
+            else:
+                # A public export keeps every completed batch: its id, owner, budget,
+                # spend and ordered domains, so replay and GET survive the round trip.
+                # A batch still running is represented by its dossiers' settled state.
+                state["batches"] = [batch.state_dict() for _, batch
+                                    in sorted(self.batches.items())
+                                    if batch.pending == 0]
             return state
 
     def export(self) -> dict:
@@ -934,6 +1056,8 @@ class Store:  # pylint: disable=too-many-instance-attributes
             raise errors.validation("state must be an object")
         try:
             users, tokens, dossiers, responses, sequences, feed, seq = validated_state(state)
+            batches, batch_seq = validated_batches(state.get("batches"),
+                                                   state.get("sequences") or {}, users)
         except FixtureError as exc:
             raise exc.api_error from None
         with self.lock:
@@ -945,12 +1069,14 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.idempotency = responses
             self.feed = feed
             self.seq = seq
-            self.batches = {}
-            self._batch_seq = 0
-            self._shared = {}
+            self.batches = batches
+            self._batch_seq = batch_seq
+            self._shared = {batch_id: SharedBudget(self, batch)
+                            for batch_id, batch in batches.items()}
             self._user_seq = sequences[0]
             self._dossier_seq = sequences[1]
             self._key_locks = {}
+            self._journal_seq = 0
             for dossier in self.dossiers.values():
                 _recompute_standing(dossier)
         self.persist()

@@ -277,6 +277,27 @@ def has_statement(sentence: str, field: str) -> bool:
     return bool(phrase_spans(sentence, STATEMENT_PHRASES[field]))
 
 
+def has_executive_statement(sentence: str) -> bool:
+    """Whether the sentence carries a statement phrase for any executive title."""
+    return any(phrase_spans(sentence, TITLE_PHRASES[title]) for title in TITLES)
+
+
+def has_investor_statement(sentence: str) -> bool:
+    """Whether the sentence carries one of the investors field's statement phrases."""
+    return bool(phrase_spans(sentence, INVESTOR_PHRASES))
+
+
+def has_any_statement(sentence: str) -> bool:
+    """Whether the sentence could state any field: scalar, executive or investor.
+
+    A build reads pages whose search snippet carries any of them first, so a page
+    whose only value is a title or an investor name is not crowded out by pages that
+    only mention a scalar field.
+    """
+    return (any(has_statement(sentence, name) for name in FIELDS)
+            or has_executive_statement(sentence) or has_investor_statement(sentence))
+
+
 def has_negation(sentence: str) -> bool:
     """Whether the sentence carries any negating phrase."""
     return bool(phrase_spans(sentence, NEGATING_PHRASES))

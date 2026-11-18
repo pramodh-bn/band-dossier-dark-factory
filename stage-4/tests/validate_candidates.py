@@ -36,7 +36,7 @@ def load(corpus: pathlib.Path, challenge: pathlib.Path):
 def gathered(loaded, key, rank, domain: str, epoch: int) -> list[str]:
     """The URLs a build reads: the priority prefix that the 80-unit budget affords."""
     from app import providers  # noqa: PLC0415 - the cost table
-    from app.builds import page_priority  # noqa: PLC0415 - the shipped order
+    from app.builds import page_priority, planned_reads  # noqa: PLC0415 - the plan
 
     found: list[str] = []
     snippets: dict[str, str] = {}
@@ -50,8 +50,8 @@ def gathered(loaded, key, rank, domain: str, epoch: int) -> list[str]:
     cited = [claim["url"] for claim in
              loaded.companies[domain].research.get("nimble", {}).get(str(epoch), [])
              if claim["url"] not in found]
-    slots = max((80 - spent) // providers.RENDER_COST, 0)
-    return page_priority(found + cited, snippets, cited, domain)[:slots]
+    ordered = page_priority(found + cited, snippets, cited, domain)
+    return planned_reads(ordered, snippets, cited, domain, 80 - spent)
 
 
 def expected(entry: dict, stage: str, field: str, epoch: int = 0):

@@ -155,6 +155,40 @@ def test_every_candidate_matches_the_page_it_cites(world):
                 (header["kind"], header["published_at"]), (name, candidate)
 
 
+def test_planned_reads_keep_a_lineage_reserve_and_every_value_page():
+    """The value-bearing prefix is read; only spare rest pages give up lineage units."""
+    nine = {f"https://v{i}.test/p": "Acme Robotics is headquartered in Lisbon."
+            for i in range(9)}
+    nine.update({f"https://r{i}.test/p": "Acme Robotics publishes a note."
+                 for i in range(8)})
+    ordered = builds.page_priority(list(nine), nine, [], ACME)
+    assert len(builds.planned_reads(ordered, nine, [], ACME, 45)) == 13
+    assert builds.planned_reads(ordered, nine, [], ACME, 45) == ordered[:13]
+    # Fourteen value-bearing pages still all fit, leaving one extra page for lineage.
+    fourteen = {f"https://v{i}.test/p": "Acme Robotics is headquartered in Lisbon."
+                for i in range(13)}
+    fourteen["https://t.test/p"] = "Acme Robotics CTO: Ben Okafor."
+    fourteen.update({f"https://r{i}.test/p": "Acme Robotics publishes a note."
+                     for i in range(4)})
+    ordered = builds.page_priority(list(fourteen), fourteen, [], ACME)
+    assert len(builds.planned_reads(ordered, fourteen, [], ACME, 45)) == 14
+    # A prefix larger than the affordable slots is capped by the budget.
+    assert len(builds.planned_reads(ordered, fourteen, [], ACME, 9)) == 3
+
+
+def test_triage_prioritises_executive_and_investor_only_pages(world):
+    """An executive or investor statement in a snippet is value-bearing, not `rest`."""
+    snippets = {
+        "https://plain.test/page": "Acme Robotics publishes a note.",
+        "https://titles.test/page": "Acme Robotics CTO: Ben Okafor.",
+        "https://investors.test/page": "Acme Robotics is backed by Northwind Ventures.",
+    }
+    ordered = builds.page_priority(list(snippets), snippets, [], ACME)
+    assert ordered[-1] == "https://plain.test/page"
+    assert set(ordered[:2]) == {"https://titles.test/page",
+                                "https://investors.test/page"}
+
+
 def test_a_page_repeated_by_every_search_is_read_once(world):
     """Ten searches over the same pages read each selected page once."""
     body = build(world, WIDE)

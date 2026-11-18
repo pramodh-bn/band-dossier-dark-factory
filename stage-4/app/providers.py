@@ -114,11 +114,14 @@ class Budget:
         return True
 
     def refund(self, units: int) -> None:
-        """Give back the units of a call the provider refused."""
+        """Give back the units of a call the provider refused.
+
+        The batch's counted spend is given back by the same `on_spend` checkpoint
+        that records the dossier and build refund, so a snapshot and the journal
+        always agree about the batch too.
+        """
         with self._lock:
             self.spent -= units
-            if self.shared is not None:
-                self.shared.refund(units)
         self.on_spend(-units)
 
 

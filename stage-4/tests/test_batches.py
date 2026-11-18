@@ -160,6 +160,32 @@ def test_concurrent_batches_create_one_dossier_and_one_build(world):
     assert len(openings) == 1
 
 
+def test_a_completed_batch_survives_export_and_import(world, client):
+    """A completed batch keeps its id, owner, spend and replay across a round trip."""
+    idem = key()
+    created = post_batch(world, [SECOND], 100, idem).json()
+    done = finish(world, created["batch_id"])
+    snapshot = client.get("/_test/export").json()
+    assert "batches" in snapshot["state"], snapshot["state"].keys()
+    exported = [batch for batch in snapshot["state"]["batches"]
+                if batch["batch_id"] == created["batch_id"]]
+    assert exported and exported[0]["pending"] == 0
+
+    client.post("/_test/reset", json={"now": "2026-03-01T09:00:00+00:00",
+                                      "users": []})
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    restored = world.get(f"/batches/{created['batch_id']}")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["budget_units"] == 100
+    assert restored.json()["spent_units"] == done["spent_units"]
+
+    replay = post_batch(world, [SECOND], 100, idem)
+    assert replay.status_code == 200 and replay.json() == created
+    fresh = post_batch(world, [RIVAL], 100)
+    assert fresh.status_code == 202
+    assert fresh.json()["batch_id"] != created["batch_id"]
+
+
 def test_a_batch_with_every_provider_failing_is_not_a_server_error(world):
     """Builds fail cleanly and the batch is done, without a 5xx."""
     fakeweb.FAULTS.update({"search", "extract", "research"})

@@ -26,11 +26,13 @@ may point the Nimble SDK elsewhere. Every provider call goes through WebRouter's
 `nimble` backend — searches, rendered extracts and research runs — so a build
 works with Nimble alone.
 
-State is written to `STATE_PATH` (default `/data/state.json`) after every
-mutation, atomically (temp file, fsync, rename). The image creates `/data`, so a
-`docker stop`/`docker start` or a `docker kill` followed by `docker start` of the
-same container answers exactly as before the stop. Mount a volume at `/data` to
-keep it across `docker rm`.
+State is written to `STATE_PATH` (default `/data/state.json`) atomically (temp
+file, fsync, rename). Structural mutations take a snapshot; a provider call's
+spend checkpoint is appended to `STATE_PATH.journal` and fsynced before the call,
+so a kill cannot lose a billed unit and a reader does not wait on a whole-state
+write. The image creates `/data`, so a `docker stop`/`docker start` or a
+`docker kill` followed by `docker start` of the same container answers exactly as
+before the stop. Mount a volume at `/data` to keep it across `docker rm`.
 
 ## The API
 
@@ -87,12 +89,14 @@ name in exactly one value qualifies; otherwise it is a `change`.
 ## Cost
 
 Ten lite searches (the first exactly the domain), one research run (25 units), then
-rendered extracts (3 units a URL) in priority order — research-cited pages, the
-company's own pages, pages whose search snippet carries field vocabulary, then the
-rest — up to what the remaining 80-unit budget affords, then any lineage original
-rule 2 needs (one unit a URL). The prefix is fixed before anything is sent, so a
-build reads the same pages every time. `spent_units` equals the provider's own cost
-log; refused calls cost nothing and are retried with a bounded backoff.
+rendered extracts (3 units a URL) in priority order - research-cited pages, the
+company's own pages, pages whose search snippet carries scalar, executive-title or
+investor vocabulary, then the rest - up to what the remaining 80-unit budget
+affords. A small reserve is kept back from the page queue for the one-unit lineage
+extracts that resolve a copy's canonical original. The prefix is fixed before
+anything is sent, so a build reads the same pages every time. `spent_units` equals
+the provider's own cost log; refused calls cost nothing and are retried with a
+bounded backoff.
 
 A batch runs one build per new dossier under a shared `budget_units` (1 to 100000)
 besides each build's 80-unit cap. A domain that already has a dossier is not
@@ -132,7 +136,12 @@ python -m tests.validate_candidates --corpus <set> --challenge <dossier challeng
 
 ## Upgrades
 
-`POST /_test/import` accepts this team's stage-1, stage-2 and stage-3 exports.
+`POST /_test/import` accepts this team's stage-1, stage-2 and stage-3 exports and
+this service's own exports. A public export carries every completed batch with its
+id, owner, budget, spend and ordered domains; import restores the batch sequence,
+so a completed key replays its original response, `GET /batches/{id}` still answers
+and a new batch gets a fresh id. A batch still running is represented by its
+dossiers' settled state, not as a batch.
 
 - **Stage 3** exports round-trip everything: builds, page versions, history, the
   feed and its sequence, so `?as_of=` and `/values` answer as they did. Candidates
@@ -152,8 +161,9 @@ python -m tests.validate_candidates --corpus <set> --challenge <dossier challeng
 
 ## Restarts and interrupted builds
 
-The state file is written atomically under the state lock after every mutation,
-and it holds a running build's job and its spend checkpoint as well. A process
+The state file is written atomically for structural mutations, and it holds a
+running build's job; each spend checkpoint is appended to the journal and fsynced
+before its provider call. A process
 that is killed mid-build therefore reads back the dossier as it was before the
 build, with the units the build had spent, and ends that one logical build
 `failed` while loading — before `/health` first answers. Fields stay as they were,
