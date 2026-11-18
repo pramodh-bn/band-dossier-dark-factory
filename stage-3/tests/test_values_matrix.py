@@ -2,8 +2,11 @@
 
 A page version is what one ready build gathered from one URL: its candidates and its
 `true_from`. A later version replaces earlier ones whose `true_from` is on or after its
-own, and the latest one it does not replace stops holding at its `true_from`. A
-version with a null `true_from` holds from no date and replaces every earlier one.
+own, and the latest one it does not replace stops holding at its `true_from` — even when
+an already replaced version had ended it later. A version with a null `true_from` holds
+from no date and replaces every earlier one. A correction that lands inside the known
+timeline (older evidence survives before it, and it replaces a later-starting claim)
+answers for the span up to that replaced claim's start.
 """
 from __future__ import annotations
 
@@ -95,6 +98,65 @@ def test_versions_from_one_build_keep_their_order():
     assert [v["candidates"] for v in holds(versions, "2020-06-01")] == [["third"]]
 
 
+def test_a_correction_inside_the_timeline_moves_the_older_end():
+    """2024 A, 2026 B, then 2025 C: the older version now ends at 2025, not 2026."""
+    versions: list[dict] = []
+    store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
+    store._add_version(versions, {"true_from": "2026-01-01", "candidates": ["B"]})
+    store._add_version(versions, {"true_from": "2025-01-01", "candidates": ["C"]})
+    assert [v["candidates"] for v in holds(versions, "2024-06-01")] == [["A"]]
+    assert [v["candidates"] for v in holds(versions, "2025-06-01")] == [["C"]]
+    assert holds(versions, "2026-06-01") == []
+    assert versions[0]["end"] == "2025-01-01"
+    assert versions[2]["end"] == "2026-01-01"
+
+
+def test_a_correction_before_every_version_holds_forward():
+    """A correction older than every known version replaces them and holds from its date."""
+    versions: list[dict] = []
+    store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
+    store._add_version(versions, {"true_from": "2026-01-01", "candidates": ["B"]})
+    store._add_version(versions, {"true_from": "2020-01-01", "candidates": ["C"]})
+    assert holds(versions, "2019-12-31") == []
+    assert [v["candidates"] for v in holds(versions, "2020-06-01")] == [["C"]]
+    assert [v["candidates"] for v in holds(versions, "2026-06-01")] == [["C"]]
+    assert versions[2]["end"] is None
+
+
+def test_an_equal_date_correction_replaces_without_ending_itself():
+    """Two versions with the same `true_from`: the later one wins and keeps holding."""
+    versions: list[dict] = []
+    store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
+    store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["B"]})
+    assert [v["candidates"] for v in holds(versions, "2024-06-01")] == [["B"]]
+    assert versions[1]["end"] is None
+
+
+def test_a_later_version_never_extends_an_earlier_end():
+    """An older survivor keeps an end that is already earlier than the new start."""
+    versions: list[dict] = []
+    store._add_version(versions, {"true_from": "2020-01-01", "candidates": ["A"]})
+    store._add_version(versions, {"true_from": "2021-01-01", "candidates": ["B"]})
+    store._add_version(versions, {"true_from": "2023-01-01", "candidates": ["C"]})
+    assert versions[0]["end"] == "2021-01-01"
+    assert versions[1]["end"] == "2023-01-01"
+    assert [v["candidates"] for v in holds(versions, "2020-06-01")] == [["A"]]
+    assert [v["candidates"] for v in holds(versions, "2021-06-01")] == [["B"]]
+    assert [v["candidates"] for v in holds(versions, "2023-06-01")] == [["C"]]
+
+
+def test_an_empty_correction_inside_the_timeline_still_ends_the_older_one():
+    """An empty corrective version ends the older value where it starts and then stops."""
+    versions: list[dict] = []
+    store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
+    store._add_version(versions, {"true_from": "2026-01-01", "candidates": ["B"]})
+    store._add_version(versions, {"true_from": "2025-01-01", "candidates": []})
+    assert [v["candidates"] for v in holds(versions, "2024-06-01")] == [["A"]]
+    assert holds(versions, "2025-06-01") == [{"start": "2025-01-01", "end": "2026-01-01",
+                                              "dead": False, "candidates": []}]
+    assert holds(versions, "2026-06-01") == []
+
+
 # -- through the API -------------------------------------------------------
 
 def test_a_page_that_loses_its_value_ends_the_old_version(world):
@@ -147,6 +209,35 @@ def test_values_matrix_of_null_ended_and_replaced_versions(world):
         field = world.get(f"/dossiers/{ACME}/values",
                           params={"true_at": day}).json()["fields"]["hq_city"]
         assert (field["value"], field["true_from"]) == (value, true_from), day
+
+
+def test_a_correction_inside_the_timeline_answers_up_to_the_replaced_claim(world):
+    """Builds at epochs 1, 5, 2: the empty correction ends Porto at 2026-02-15."""
+    fakeweb.EPOCH = 1                            # Porto from 2026-02-01
+    build(world)
+    move(world, 5, "2026-03-02T09:00:00+00:00")   # Faro from 2026-03-01
+    world.post(f"/dossiers/{ACME}/refresh", headers={"Idempotency-Key": key()})
+    wait_ready(world, ACME)
+    move(world, 2, "2026-03-03T11:00:00+02:00")   # no city from 2026-02-15 (a correction)
+    world.post(f"/dossiers/{ACME}/refresh", headers={"Idempotency-Key": key()})
+    wait_ready(world, ACME)
+
+    def city(day, as_of=None):
+        params = {"true_at": day}
+        if as_of:
+            params["as_of"] = as_of
+        return world.get(f"/dossiers/{ACME}/values", params=params).json()["fields"]["hq_city"]
+
+    assert city("1970-01-01", "2026-03-02T12:00:00+00:00")["value"] is None
+    assert city("2026-02-10", "2026-03-02T12:00:00+00:00")["value"] == "Porto"
+    assert city("2026-02-20", "2026-03-02T12:00:00+00:00")["value"] == "Porto"
+    assert city("2026-02-20")["value"] is None
+    assert city("2026-03-10")["value"] is None
+    assert city("2026-02-20")["citations"] == []
+    # The third build shares its instant with 09:00Z, and it is last in build order, so an
+    # as_of written with the other offset still includes it.
+    assert city("2026-02-20", "2026-03-03T09:00:00+00:00")["value"] is None
+    assert city("2026-02-20", "2026-03-02T12:00:00+00:00")["value"] == "Porto"
 
 
 def test_values_at_a_date_before_any_version_are_empty(world):
