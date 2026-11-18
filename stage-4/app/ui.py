@@ -157,7 +157,7 @@ footer.foot { max-width: 1080px; margin: 0 auto; padding: 0 20px 40px; color: va
   <div class="stack"><div class="skeleton" style="width:38%"></div>
   <div class="skeleton" style="width:72%"></div><div class="skeleton" style="width:56%"></div></div>
 </main>
-<footer class="foot"><span id="foot">Six fields, every value with the reading it came from.</span></footer>
+<footer class="foot"><span id="foot">Eight fields, every value with the readings and origins behind it.</span></footer>
 <script>
 "use strict";
 const FIELDS = ["legal_name", "hq_city", "ceo", "founded_year", "headcount_range", "funding_total"];
@@ -430,6 +430,26 @@ function executivesHtml(body) {
   </section>`;
 }
 
+function investorsHtml(body) {
+  const field = (body.fields || {}).investors;
+  if (!field) return "";
+  const members = field.value || [];
+  const rows = members.length
+    ? members.map((member) => `<li><strong>${escapeHtml(member)}</strong></li>`).join("")
+    : `<li class="muted">No investor is established by the evidence yet.</li>`;
+  const cites = (field.citations || []).map((cite) => `
+    <blockquote class="cite">${escapeHtml(cite.excerpt)}
+      <div class="cite-foot"><span class="pill kind">${escapeHtml(cite.provider)}</span>
+        <a href="${escapeHtml(cite.url)}" rel="noopener noreferrer" target="_blank">Open source</a>
+      </div></blockquote>`).join("");
+  return `<section class="card" style="margin-top:16px" aria-label="Investors">
+    <div class="field-head"><h2 style="margin:0">Investors</h2>
+      <span class="pill ${escapeHtml(field.status)}">${escapeHtml(field.status)}</span></div>
+    <ul class="list" style="margin-top:10px">${rows}</ul>
+    ${cites ? `<div class="cites" style="margin-top:10px">${cites}</div>` : ""}
+  </section>`;
+}
+
 function fieldsHtml(body) {
   return `<div class="fields">` + FIELDS.map((name) => {
     const field = (body.fields || {})[name] || {value: null, status: "unknown", citations: []};
@@ -504,7 +524,7 @@ async function renderDossier(domain) {
       </div>
     </div>
     <div id="dossier-notes" class="stack" style="margin:16px 0"></div>
-    <div id="dossier-body">${body.state === "building" ? buildingNotice(body) : fieldsHtml(body) + executivesHtml(body)}</div>`;
+    <div id="dossier-body">${body.state === "building" ? buildingNotice(body) : fieldsHtml(body) + executivesHtml(body) + investorsHtml(body)}</div>`;
   const notes = document.getElementById("dossier-notes");
   if (pendingRefresh && pendingRefresh.uncertain && pendingRefresh.domain === body.domain) {
     notes.innerHTML = notice("refresh-uncertain",
@@ -529,7 +549,7 @@ function buildingNotice(body) {
   return `<div class="alert info" data-testid="building-notice">
     Research is running. This page checks again every ${POLL_MS / 1000} seconds.
   </div>
-  <div style="margin-top:16px">${fieldsHtml(body)}</div>`;
+  <div style="margin-top:16px">${fieldsHtml(body) + executivesHtml(body) + investorsHtml(body)}</div>`;
 }
 
 async function refresh(domain, notes) {

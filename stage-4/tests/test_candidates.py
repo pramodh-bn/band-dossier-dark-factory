@@ -93,7 +93,8 @@ def test_statuses_follow_the_candidates():
     assert len(contested["citations"]) == 1
     empty = candidates.field([])
     assert empty == {"value": None, "status": "unknown", "citations": [], "candidates": [],
-                    "true_from": None, "learned_at": None}
+                    "true_from": None, "learned_at": None, "origins": [],
+                    "corroborated": False, "corroborated_since": None}
 
 
 def test_exactly_one_candidate_is_selected():

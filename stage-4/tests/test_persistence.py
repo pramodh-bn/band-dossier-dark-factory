@@ -17,7 +17,7 @@ from app import providers, server as app_server
 from conftest import ALICE, FIELDS, fixture, wait_ready
 
 ACME = "acme-robotics.test"
-ALL = FIELDS + ("executives",)
+ALL = FIELDS + ("executives", "investors")
 
 
 def key() -> str:

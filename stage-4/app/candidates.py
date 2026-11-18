@@ -12,17 +12,20 @@ order cfo, coo, cto.
 """
 from __future__ import annotations
 
-from .pages import AUTHORITY, KINDS, instant
+from .pages import AUTHORITY, KINDS, host_of, instant
 
 PROVIDERS = ("nimble", "tavily", "kernel", "browserbase")
 PROVIDER_ORDER = {name: index for index, name in enumerate(PROVIDERS)}
 FIELDS = ("legal_name", "hq_city", "ceo", "founded_year", "headcount_range", "funding_total")
 TITLES = ("cfo", "coo", "cto")
 EXECUTIVES = "executives"
-ALL_FIELDS = FIELDS + (EXECUTIVES,)
+INVESTORS = "investors"
+ALL_FIELDS = FIELDS + (EXECUTIVES, INVESTORS)
 CANDIDATE_KEYS = ("value", "url", "excerpt", "provider", "kind", "published_at",
-                  "retrieved_at", "true_from", "learned_at", "selected")
+                  "retrieved_at", "true_from", "learned_at", "selected", "origin")
 EXECUTIVE_KEYS = CANDIDATE_KEYS + ("title",)
+#: Kinds that make a candidate enough for an investor name to be a member on its own.
+MEMBER_KINDS = ("own", "filing")
 
 
 def canonical(value):
@@ -94,17 +97,36 @@ def _citation(candidate: dict) -> dict:
             "provider": candidate["provider"]}
 
 
-def field(candidates: list[dict]) -> dict:
+def _origins(candidates: list[dict]) -> list[str]:
+    """The distinct origins of some candidates, sorted ascending (§4, Origins)."""
+    return sorted({candidate.get("origin") for candidate in candidates
+                   if candidate.get("origin")})
+
+
+def _corroborated(groups: list[list[dict]]) -> bool:
+    """Whether every group's candidates have two or more distinct origins (§4)."""
+    return bool(groups) and all(len(_origins(group)) >= 2 for group in groups)
+
+
+def _empty_field() -> dict:
+    """An `unknown` field: no value, no candidates, no origins (§4, §2)."""
+    return {"value": None, "status": "unknown", "citations": [], "candidates": [],
+            "true_from": None, "learned_at": None, "origins": [],
+            "corroborated": False, "corroborated_since": None}
+
+
+def field(candidates: list[dict], corroborated_since: str | None = None) -> dict:
     """A field's value, status, citations and ordered candidates from its candidates."""
     prepared = [{**candidate, "value": canonical(candidate.get("value"))}
                 for candidate in candidates]
     ordered = sorted(dedupe(prepared), key=rank_key)
     if not ordered:
-        return {"value": None, "status": "unknown", "citations": [], "candidates": [],
-                "true_from": None, "learned_at": None}
+        return _empty_field()
     selected = ordered[0]["value"]
-    citations = [_citation(candidate) for candidate in ordered
-                 if same_value(candidate["value"], selected)]
+    selected_candidates = [candidate for candidate in ordered
+                           if same_value(candidate["value"], selected)]
+    citations = [_citation(candidate) for candidate in selected_candidates]
+    origins = _origins(selected_candidates)
     return {
         "value": selected,
         "status": "known" if len(distinct(ordered)) == 1 else "contested",
@@ -114,10 +136,14 @@ def field(candidates: list[dict]) -> dict:
                        for index, candidate in enumerate(ordered)],
         "true_from": ordered[0].get("true_from"),
         "learned_at": ordered[0].get("learned_at"),
+        "origins": origins,
+        "corroborated": len(origins) >= 2,
+        "corroborated_since": corroborated_since,
     }
 
 
-def executives_field(candidates: list[dict]) -> dict:
+def executives_field(candidates: list[dict],
+                     corroborated_since: str | None = None) -> dict:
     """The executives field: each title ranked on its own, members in cfo, coo, cto order."""
     prepared = [{**candidate, "value": canonical(candidate.get("value"))}
                 for candidate in candidates]
@@ -128,11 +154,12 @@ def executives_field(candidates: list[dict]) -> dict:
                for title in TITLES if ranked[title]]
     ordered = [candidate for title in TITLES for candidate in ranked[title]]
     if not members:
-        return {"value": None, "status": "unknown", "citations": [], "candidates": [],
-                "true_from": None, "learned_at": None}
+        return _empty_field()
     citations = [_citation(candidate) for member in members
                  for candidate in ranked[member["title"]]
                  if same_value(candidate["value"], member["name"])]
+    groups = [[candidate for candidate in ranked[member["title"]]
+               if same_value(candidate["value"], member["name"])] for member in members]
     contested = any(len(distinct(ranked[title])) > 1 for title in TITLES)
     member_dates = [ranked[member["title"]][0].get("true_from") for member in members]
     true_from = None if any(date is None for date in member_dates) else max(member_dates)
@@ -145,6 +172,59 @@ def executives_field(candidates: list[dict]) -> dict:
                        for candidate in ordered],
         "true_from": true_from,
         "learned_at": ordered[0].get("learned_at"),
+        "origins": _origins([candidate for group in groups for candidate in group]),
+        "corroborated": _corroborated(groups),
+        "corroborated_since": corroborated_since,
+    }
+
+
+def member_true_from(candidates: list[dict]) -> str | None:
+    """A member's `true_from`: the earliest not-null one among its candidates (§4)."""
+    dates = [candidate.get("true_from") for candidate in candidates
+             if candidate.get("true_from") is not None]
+    return min(dates) if dates else None
+
+
+def investors_field(candidates: list[dict],
+                    corroborated_since: str | None = None) -> dict:
+    """The investors field: the member names, sorted, each with its candidates (§4).
+
+    A name is a member when one of its candidates has kind `own` or `filing`, or its
+    candidates have two or more distinct origins. The field is `known` exactly when
+    it has a member, and `unknown` otherwise, whatever candidates exist.
+    """
+    prepared = [{**candidate, "value": canonical(candidate.get("value"))}
+                for candidate in candidates]
+    ordered = sorted(dedupe(prepared), key=rank_key)
+    groups: dict[str, list[dict]] = {}
+    for candidate in ordered:
+        groups.setdefault(candidate["value"], []).append(candidate)
+    members = sorted(name for name, group in groups.items()
+                     if any(candidate.get("kind") in MEMBER_KINDS for candidate in group)
+                     or len(_origins(group)) >= 2)
+    if not members:
+        empty = _empty_field()
+        empty["candidates"] = [{**{key: candidate.get(key) for key in CANDIDATE_KEYS},
+                                "selected": False} for candidate in ordered]
+        empty["origins"] = []
+        empty["corroborated"] = False
+        return empty
+    member_groups = [groups[name] for name in members]
+    citations = [_citation(candidate) for group in member_groups for candidate in group]
+    member_dates = [member_true_from(group) for group in member_groups]
+    true_from = None if any(date is None for date in member_dates) else max(member_dates)
+    return {
+        "value": members,
+        "status": "known",
+        "citations": citations,
+        "candidates": [{**{key: candidate.get(key) for key in CANDIDATE_KEYS},
+                        "selected": candidate["value"] in members}
+                       for candidate in ordered],
+        "true_from": true_from,
+        "learned_at": ordered[0].get("learned_at") if ordered else None,
+        "origins": _origins([candidate for group in member_groups for candidate in group]),
+        "corroborated": _corroborated(member_groups),
+        "corroborated_since": corroborated_since,
     }
 
 
@@ -159,7 +239,7 @@ def legacy_published(stated):
 
 
 def candidates_from_citations(value, citations: list[dict], retrieved_at, kind=None,
-                              published_at=None) -> list[dict]:
+                              published_at=None, origin=None) -> list[dict]:
     """The candidates an imported field's citations support: one per cited page (§2, upgrade).
 
     A stage-1 export keeps the value and the excerpts that support it, not the
@@ -185,5 +265,7 @@ def candidates_from_citations(value, citations: list[dict], retrieved_at, kind=N
                      "published_at": legacy_published(citation.get("published_at"))
                      or published_at,
                      "retrieved_at": retrieved_at, "true_from": None,
-                     "learned_at": retrieved_at, "selected": False})
+                     "learned_at": retrieved_at, "selected": False,
+                     "origin": origin if isinstance(origin, str) and origin
+                     else host_of(url)})
     return made

@@ -46,7 +46,9 @@ def test_every_field_carries_ranked_candidates(world):
         if not field["candidates"]:
             assert field == {"value": None, "status": "unknown", "citations": [],
                              "candidates": [], "true_from": None,
-                             "learned_at": None}, (name, field)
+                             "learned_at": None, "origins": [],
+                             "corroborated": False,
+                             "corroborated_since": None}, (name, field)
             continue
         for entry in field["candidates"]:
             assert KEYS <= set(entry), (name, entry)
@@ -124,7 +126,9 @@ def test_an_unknown_field_has_no_candidates(world):
     for name in FIELDS:
         assert body["fields"][name] == {"value": None, "status": "unknown",
                                         "citations": [], "candidates": [],
-                                        "true_from": None, "learned_at": None}, name
+                                        "true_from": None, "learned_at": None,
+                                        "origins": [], "corroborated": False,
+                                        "corroborated_since": None}, name
 
 
 def test_contested_fields_are_reported_by_the_selected_value(world):

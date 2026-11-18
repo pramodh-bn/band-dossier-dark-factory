@@ -17,7 +17,7 @@ from app import store
 from conftest import FIELDS, wait_ready
 
 ACME = "acme-robotics.test"
-ALL = FIELDS + ("executives",)
+ALL = FIELDS + ("executives", "investors")
 
 
 def key() -> str:

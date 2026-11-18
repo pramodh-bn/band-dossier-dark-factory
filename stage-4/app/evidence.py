@@ -25,6 +25,14 @@ STRING_FIELDS = ("legal_name", "hq_city", "ceo")
 #: The executives field's titles, in the order a value lists them (§3, Executives).
 TITLES = ("cfo", "coo", "cto")
 
+#: The investors field (§4, Investors): its statement phrases and the words that
+#: make a run of capitalised words an investor name.
+INVESTORS = "investors"
+INVESTOR_PHRASES = ("investor", "investors", "led by", "backed by", "participated")
+INVESTOR_SUFFIXES = ("Ventures", "Capital", "Partners", "Fund", "Investments",
+                     "Holdings", "Equity")
+INVESTOR_LEADS = ("led by", "backed by")
+
 #: Each title is a field of its own for Appendix A, with the ceo format and these phrases.
 TITLE_PHRASES = {
     "cfo": ("chief financial officer", "CFO"),
@@ -613,6 +621,50 @@ def supported_executive(sentence: str, title: str, domain: str):
     return first
 
 
+def _investor_runs(sentence: str, domain: str) -> list[str]:
+    """Every run of capitalised words the sentence names as an investor (§4, Investors).
+
+    Occurrences of the company's name and of the field's statement phrases are first
+    taken out, so the words around them do not join. A run of two or more words whose
+    last word is one of the investor suffixes is a name; when the sentence contains an
+    amount, the run directly after `led by` or `backed by` is a name too, whatever its
+    length and last word.
+    """
+    removed = list(phrase_spans(sentence, (domain, company_name(domain))))
+    removed += phrase_spans(sentence, INVESTOR_PHRASES)
+    text = _without_spans(sentence, removed)
+    names: list[str] = []
+    for start, end, words in _runs(text, " "):
+        if words < 2:
+            continue
+        name = text[start:end].strip()
+        if name.split()[-1] in INVESTOR_SUFFIXES and name not in names:
+            names.append(name)
+    if amount_spans(sentence):
+        for _, end in phrase_spans(sentence, INVESTOR_LEADS):
+            if not sentence.startswith(" ", end) or sentence.startswith("  ", end):
+                continue
+            run = _run_end(sentence, end + 1, " ")
+            if run is not None:
+                name = sentence[end + 1:run[0]].strip()
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def investor_names(sentence: str, domain: str) -> list[str]:
+    """Every investor name the sentence states (A.2 rules 1-4 with the field's format)."""
+    if not sentence or len(sentence) > 20_000:
+        return []
+    if not names_company(sentence, domain):
+        return []
+    if not phrase_spans(sentence, INVESTOR_PHRASES):
+        return []
+    if has_negation(sentence):
+        return []
+    return _investor_runs(sentence, domain)
+
+
 def _value_text(sentence: str, field: str, value, domain: str) -> str:
     """The value as the sentence writes it, for finding an excerpt window."""
     if field in STRING_FIELDS and isinstance(value, str):
@@ -683,6 +735,39 @@ def page_values(text: str, domain: str) -> dict[str, list[tuple[object, str]]]:
             if excerpt is None:
                 continue
             found.setdefault(field, []).append((value, excerpt))
+    return found
+
+
+def _investor_excerpt(sentence: str, name: str, domain: str) -> str | None:
+    """A 500-character excerpt of `sentence` that still supports `name`, or the whole one."""
+    collapsed = " ".join(sentence.split())
+    if len(collapsed) <= MAX_EXCERPT:
+        return collapsed
+    position = sentence.find(name)
+    windows = []
+    if position >= 0:
+        end = position + len(name)
+        windows.append((max(0, end - MAX_EXCERPT), end))
+        windows.append((position, position + MAX_EXCERPT))
+    windows.append((0, MAX_EXCERPT))
+    windows.append((len(sentence) - MAX_EXCERPT, len(sentence)))
+    for start, end in windows:
+        window = sentence[start:end].strip()
+        if window and name in investor_names(window, domain):
+            return " ".join(window.split())
+    return None
+
+
+def page_investors(text: str, domain: str) -> list[tuple[str, str]]:
+    """[(investor name, excerpt)] for every investor `text`'s prose names (§4, Investors)."""
+    found: list[tuple[str, str]] = []
+    for sentence in sentences(prose_of(text)):
+        if not sentence:
+            continue
+        for name in investor_names(sentence, domain):
+            excerpt = _investor_excerpt(sentence, name, domain)
+            if excerpt is not None and (name, excerpt) not in found:
+                found.append((name, excerpt))
     return found
 
 

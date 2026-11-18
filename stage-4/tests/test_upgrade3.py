@@ -10,7 +10,7 @@ import fakeweb
 from conftest import FIELDS, NOW, fixture, wait_ready
 
 ACME = "acme-robotics.test"
-ALL = FIELDS + ("executives",)
+ALL = FIELDS + ("executives", "investors")
 LATER = "2026-05-01T09:00:00+00:00"
 
 
@@ -35,6 +35,32 @@ def as_stage_two(export: dict) -> dict:
         for name in ("builds", "history", "learned"):
             dossier.pop(name, None)
     return {"track": "dossier", "format_version": 1, "state": state}
+
+
+def as_stage_three(export: dict) -> dict:
+    """`export` as the stage-3 service wrote it: no investors and no stage-4 keys."""
+    export = copy.deepcopy(export)
+    for dossier in export["state"]["dossiers"]:
+        dossier.pop("standing", None)
+        _strip_field(dossier.get("fields", {}))
+        (dossier.get("history") or {}).pop("investors", None)
+        for build in dossier.get("builds") or []:
+            if build.get("fields"):
+                _strip_field(build["fields"])
+            for version in (build.get("versions") or {}).values():
+                for candidate in version.get("candidates") or []:
+                    candidate.pop("origin", None)
+    return export
+
+
+def _strip_field(fields: dict) -> None:
+    """Remove the investors field and the stage-4 keys from a field and its candidates."""
+    fields.pop("investors", None)
+    for field in fields.values():
+        for key in ("origins", "corroborated", "corroborated_since"):
+            field.pop(key, None)
+        for candidate in field.get("candidates") or []:
+            candidate.pop("origin", None)
 
 
 def as_stage_one(export: dict) -> dict:
@@ -194,6 +220,54 @@ def test_an_imported_dossier_without_a_build_answers_no_as_of(client, world):
     response = world.get(f"/dossiers/{ACME}", params={"as_of": NOW})
     assert response.status_code == 404
     assert world.get(f"/dossiers/{ACME}").json()["state"] == "failed"
+
+
+def test_a_stage_three_export_leaves_investors_unknown_until_a_build(world, client):
+    """A stage-3 export has no investors: no value, no history, and each kept build unknown."""
+    domain = "origin-works.test"
+    build(world, domain)
+    export = as_stage_three(client.get("/_test/export").json())
+    client.post("/_test/reset", json=fixture())
+    assert client.post("/_test/import", json=export).status_code == 204
+    imported = world.get(f"/dossiers/{domain}").json()
+    investors = imported["fields"]["investors"]
+    assert investors["value"] is None and investors["status"] == "unknown"
+    assert investors["candidates"] == [] and investors["origins"] == []
+    history = world.get(f"/dossiers/{domain}/history").json()["fields"]["investors"]
+    assert history == []
+    as_of = world.get(f"/dossiers/{domain}",
+                      params={"as_of": imported["researched_at"]}).json()
+    assert as_of["fields"]["investors"]["value"] is None
+    world.post("/_test/clock", json={"now": LATER})
+    world.post(f"/dossiers/{domain}/refresh", headers={"Idempotency-Key": key()})
+    after = wait_ready(world, domain)
+    assert after["fields"]["investors"]["value"] == ["Bluebird Capital", "General Atlantic",
+                                                    "Northwind Ventures"]
+    entries = world.get(f"/dossiers/{domain}/history").json()["fields"]["investors"]
+    assert [entry["type"] for entry in entries] == ["change"]
+
+
+def test_a_stage_three_import_rebuilds_standing_origins_and_their_time(world, client):
+    """Origins the export lacked become each URL's host, and corroboration is replayed."""
+    domain = "origin-works.test"
+    registry = "https://registry.test/origin-works"
+    original = fakeweb.PAGES[domain].pop(registry)
+    try:
+        build(world, domain)
+        fakeweb.PAGES[domain][registry] = original
+        world.post("/_test/clock", json={"now": LATER})
+        world.post(f"/dossiers/{domain}/refresh", headers={"Idempotency-Key": key()})
+        second = wait_ready(world, domain)
+        assert second["researched_at"] == LATER
+        snapshot = as_stage_three(client.get("/_test/export").json())
+        client.post("/_test/reset", json=fixture())
+        assert client.post("/_test/import", json=snapshot).status_code == 204
+        legal = world.get(f"/dossiers/{domain}").json()["fields"]["legal_name"]
+        assert legal["origins"] == [domain, "registry.test"]
+        assert legal["corroborated"] is True
+        assert legal["corroborated_since"] == LATER
+    finally:
+        fakeweb.PAGES[domain][registry] = original
 
 
 @pytest.mark.parametrize("bad", [

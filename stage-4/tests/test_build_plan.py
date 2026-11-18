@@ -139,7 +139,9 @@ def test_no_candidate_comes_from_a_page_the_build_did_not_read(world):
     assert body["spent_units"] == fakeweb.spent() == 10 + 25
     for name, field in body["fields"].items():
         assert field == {"value": None, "status": "unknown", "citations": [],
-                         "candidates": [], "true_from": None, "learned_at": None}, name
+                         "candidates": [], "true_from": None, "learned_at": None,
+                         "origins": [], "corroborated": False,
+                         "corroborated_since": None}, name
 
 
 def test_every_candidate_matches_the_page_it_cites(world):

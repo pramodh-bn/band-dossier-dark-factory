@@ -24,6 +24,7 @@ from datetime import date, datetime, timezone
 
 from . import errors, passwords
 from . import candidates as candidates_module
+from . import evidence as evidence_module
 from . import pages as pages_module
 from .domain import InvalidDomain, normalised_or_raise
 
@@ -38,6 +39,9 @@ FORMAT_VERSION = 1
 FIELDS = candidates_module.ALL_FIELDS
 SIX = candidates_module.FIELDS
 TITLES = candidates_module.TITLES
+INVESTORS = candidates_module.INVESTORS
+MAX_BATCH_DOMAINS = 50
+MAX_BATCH_BUDGET = 100_000
 
 
 class FixtureError(Exception):
@@ -68,9 +72,10 @@ def parse_day(text) -> str:
 
 
 def empty_fields() -> dict:
-    """All seven fields of a dossier, each unknown and without candidates (§4, §2, §3)."""
+    """All eight fields of a dossier, each unknown and without candidates (§4)."""
     return {name: {"value": None, "status": "unknown", "citations": [], "candidates": [],
-                   "true_from": None, "learned_at": None}
+                   "true_from": None, "learned_at": None, "origins": [],
+                   "corroborated": False, "corroborated_since": None}
             for name in FIELDS}
 
 
@@ -103,6 +108,10 @@ class Dossier:  # pylint: disable=too-many-instance-attributes
     builds: list = field(default_factory=list)
     history: dict = field(default_factory=lambda: {name: [] for name in FIELDS})
     learned: dict = field(default_factory=dict)
+    #: The origins every ready build has gathered for each current member (§4).
+    standing: dict = field(default_factory=dict)
+    #: The build running now, if any: its time, spend and batch (§8, §4, Restarts).
+    job: dict | None = None
     initialised: bool = False
 
     def view(self) -> dict:
@@ -125,18 +134,28 @@ class Dossier:  # pylint: disable=too-many-instance-attributes
         return {"dossier_id": self.dossier_id, "domain": self.domain, "state": "failed",
                 "fields": empty_fields(), "researched_at": None, "spent_units": 0,
                 "builds": [], "history": {name: [] for name in FIELDS}, "learned": {},
-                "initialised": False}
+                "standing": {}, "initialised": False}
 
-    def state_dict(self) -> dict:
-        """This dossier as export stores it."""
+    def state_dict(self, durable: bool = False) -> dict:
+        """This dossier as export stores it.
+
+        `durable` is the state file: a running build's settled state also carries
+        the units its calls have spent, and the job itself is written beside it so a
+        restart can end that build. An export never carries a running build.
+        """
         if self.running:
-            return self.settled()
+            state = self.settled()
+            if durable:
+                state["spent_units"] += (self.job or {}).get("spent", 0)
+            return state
         return {"dossier_id": self.dossier_id, "domain": self.domain, "state": self.state,
                 "fields": copy.deepcopy(self.fields), "researched_at": self.researched_at,
                 "spent_units": self.spent_units,
                 "builds": copy.deepcopy(self.builds),
                 "history": copy.deepcopy(self.history),
-                "learned": dict(self.learned), "initialised": self.initialised}
+                "learned": dict(self.learned),
+                "standing": copy.deepcopy(self.standing),
+                "initialised": self.initialised}
 
 
 @dataclass
@@ -146,6 +165,59 @@ class StoredResponse:
     body: str
     status: int
     payload: dict
+
+
+class SharedBudget:
+    """A batch's budget, shared by every build the batch started (§4, Batches).
+
+    Reserving and refunding take the store's lock, so concurrent builds can never
+    take the batch's spending over its `budget_units`.
+    """
+
+    def __init__(self, store: "Store", batch: "Batch") -> None:
+        self.store = store
+        self.batch = batch
+
+    def reserve(self, units: int) -> bool:
+        """Claim `units` of the batch's budget, or False when they would go over it."""
+        with self.store.lock:
+            if self.batch.spent_units + units > self.batch.budget_units:
+                return False
+            self.batch.spent_units += units
+            return True
+
+    def refund(self, units: int) -> None:
+        """Give back the units of a call the provider refused."""
+        with self.store.lock:
+            self.batch.spent_units = max(0, self.batch.spent_units - units)
+
+
+@dataclass
+class Batch:
+    """One researcher's batch of companies under one shared budget (§4, Batches)."""
+
+    batch_id: str
+    user_id: str
+    budget_units: int
+    domains: list = field(default_factory=list)
+    spent_units: int = 0
+    pending: int = 0
+
+    def state_dict(self) -> dict:
+        """The batch as the state file stores it."""
+        return {"batch_id": self.batch_id, "user_id": self.user_id,
+                "budget_units": self.budget_units, "spent_units": self.spent_units,
+                "domains": list(self.domains), "pending": self.pending}
+
+    def view(self, dossiers: dict) -> dict:
+        """The body `POST /batches` and `GET /batches/{id}` answer with."""
+        states = [{"domain": domain,
+                   "state": dossiers[domain].state if domain in dossiers else "failed"}
+                  for domain in self.domains]
+        return {"batch_id": self.batch_id,
+                "state": "running" if self.pending > 0 else "done",
+                "budget_units": self.budget_units, "spent_units": self.spent_units,
+                "dossiers": states}
 
 
 class Store:  # pylint: disable=too-many-instance-attributes
@@ -163,6 +235,9 @@ class Store:  # pylint: disable=too-many-instance-attributes
         self.idempotency: dict[tuple[str, str], dict[tuple[str, str], StoredResponse]] = {}
         self.feed: list[dict] = []
         self.seq = 0
+        self.batches: dict[str, Batch] = {}
+        self._batch_seq = 0
+        self._shared: dict[str, SharedBudget] = {}
         self._user_seq = 0
         self._dossier_seq = 0
         self._key_locks: dict[tuple[str, str], threading.Lock] = {}
@@ -183,7 +258,7 @@ class Store:  # pylint: disable=too-many-instance-attributes
             return
         with self.lock:
             with self._persist_lock:
-                body = json.dumps(self.export_state(), ensure_ascii=False)
+                body = json.dumps(self.export_state(durable=True), ensure_ascii=False)
                 directory = os.path.dirname(os.path.abspath(self.path)) or "."
                 try:
                     os.makedirs(directory, exist_ok=True)
@@ -222,6 +297,8 @@ class Store:  # pylint: disable=too-many-instance-attributes
             return
         try:
             users, tokens, dossiers, responses, sequences, feed, seq = validated_state(state)
+            batches, batch_seq = validated_batches(state.get("batches"),
+                                                   state.get("sequences") or {}, users)
         except FixtureError:
             return
         with self.lock:
@@ -233,7 +310,48 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.idempotency = responses
             self.feed = feed
             self.seq = seq
+            self.batches = batches
             self._user_seq, self._dossier_seq = sequences
+            self._batch_seq = batch_seq
+            self._shared = {}
+            for dossier in self.dossiers.values():
+                _recompute_standing(dossier)
+            self._recover_jobs(state.get("jobs") or {})
+            for batch in self.batches.values():
+                self._shared[batch.batch_id] = SharedBudget(self, batch)
+        if state.get("jobs"):
+            self.persist()
+
+    def _recover_jobs(self, jobs: dict) -> None:
+        """End every build that was running when the process stopped (§4, Restarts).
+
+        The state file holds the dossier as it was before the build, with the units
+        the build spent, and the job. A restart ends that one logical build `failed`
+        immediately -- before `/health` first answers -- leaving the fields as they
+        were and counting the spend. A later refresh starts a new build normally.
+        """
+        if not isinstance(jobs, dict):
+            return
+        for domain, job in jobs.items():
+            dossier = self.dossiers.get(domain)
+            if dossier is None or not isinstance(job, dict):
+                continue
+            spent = job.get("spent", 0)
+            when = job.get("time")
+            if not isinstance(spent, int) or isinstance(spent, bool) or spent < 0:
+                spent = 0
+            if not isinstance(when, str):
+                continue
+            dossier.builds.append({"time": when, "state": "failed", "spent": spent,
+                                   "fields": None, "versions": {}})
+            dossier.state = "failed"
+            dossier.running = False
+            dossier.committed = None
+            dossier.job = None
+            batch_id = job.get("batch_id")
+            batch = self.batches.get(batch_id) if isinstance(batch_id, str) else None
+            if batch is not None:
+                batch.pending = max(0, batch.pending - 1)
 
     # -- the clock (§3.4) ---------------------------------------------------
 
@@ -276,6 +394,9 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.idempotency = {}
             self.feed = []
             self.seq = 0
+            self.batches = {}
+            self._batch_seq = 0
+            self._shared = {}
             self._key_locks = {}
             self._user_seq = 0
             self._dossier_seq = 0
@@ -443,8 +564,12 @@ class Store:  # pylint: disable=too-many-instance-attributes
                         rows[candidate["field"]].append(candidate)
             fields = {}
             for name in FIELDS:
-                chosen = (candidates_module.executives_field(rows[name]) if name == "executives"
-                          else candidates_module.field(rows[name]))
+                if name == "executives":
+                    chosen = candidates_module.executives_field(rows[name])
+                elif name == INVESTORS:
+                    chosen = candidates_module.investors_field(rows[name])
+                else:
+                    chosen = candidates_module.field(rows[name])
                 fields[name] = {"value": chosen["value"], "true_from": chosen["true_from"],
                                 "citations": chosen["citations"]}
             return {"domain": dossier.domain, "true_at": day, "as_of": as_of_text,
@@ -467,16 +592,85 @@ class Store:  # pylint: disable=too-many-instance-attributes
         window = entries[:limit]
         return {"changes": window, "has_more": len(entries) > len(window)}
 
-    def create_or_existing(self, domain: str) -> tuple[dict, Dossier, bool]:
+    def create_or_existing(self, domain: str, when: str) -> tuple[dict, Dossier, bool]:
         """The dossier for `domain`, creating it when it does not exist, and the body to answer with."""
         with self.lock:
             existing = self.dossiers.get(domain)
             if existing is not None:
                 return summary(existing), existing, False
             dossier = Dossier(dossier_id=self._next_dossier_id(), domain=domain,
-                              state="building", running=True, generation=self.generation)
+                              state="building", running=True, generation=self.generation,
+                              job={"time": when, "spent": 0,
+                                   "generation": self.generation, "batch_id": None})
             self.dossiers[domain] = dossier
-            return summary(dossier), dossier, True
+        self.persist()
+        return summary(dossier), dossier, True
+
+    def create_batch(self, user_id: str, domains: list[str], budget_units: int,
+                     when: str) -> tuple[Batch, list[Dossier]]:
+        """Create a batch, creating and starting a first build for each new dossier.
+
+        Existing dossiers are reported as they are and cost the batch nothing (§4).
+        The whole creation takes the state lock, so two concurrent batches sharing a
+        domain create one dossier and start one build.
+        """
+        started: list[Dossier] = []
+        with self.lock:
+            while True:
+                self._batch_seq += 1
+                batch_id = f"b_{self._batch_seq}"
+                if batch_id not in self.batches:
+                    break
+            batch = Batch(batch_id=batch_id, user_id=user_id,
+                          budget_units=budget_units, domains=list(domains))
+            for domain in domains:
+                existing = self.dossiers.get(domain)
+                if existing is not None:
+                    continue
+                dossier = Dossier(dossier_id=self._next_dossier_id(), domain=domain,
+                                  state="building", running=True,
+                                  generation=self.generation,
+                                  job={"time": when, "spent": 0,
+                                       "generation": self.generation,
+                                       "batch_id": batch.batch_id})
+                self.dossiers[domain] = dossier
+                batch.pending += 1
+                started.append(dossier)
+            self.batches[batch.batch_id] = batch
+            self._shared[batch.batch_id] = SharedBudget(self, batch)
+        self.persist()
+        return batch, started
+
+    def view_batch(self, batch: Batch) -> dict:
+        """The body a freshly created batch answers with."""
+        with self.lock:
+            return batch.view(self.dossiers)
+
+    def batch_view(self, batch_id: str, user_id: str) -> dict:
+        """`GET /batches/{id}`: another user's batch, or an unknown one, is 404."""
+        with self.lock:
+            batch = self.batches.get(batch_id)
+            if batch is None or batch.user_id != user_id:
+                raise errors.not_found("no such batch")
+            return batch.view(self.dossiers)
+
+    def batch_for_user(self, batch_id: str, user_id: str) -> Batch | None:
+        """The caller's batch, or None; another user's batch is invisible."""
+        with self.lock:
+            batch = self.batches.get(batch_id)
+            return batch if batch is not None and batch.user_id == user_id else None
+
+    def shared_budget(self, dossier: Dossier) -> SharedBudget | None:
+        """The shared budget of the batch whose build is running, or None."""
+        with self.lock:
+            job = dossier.job or {}
+            batch_id = job.get("batch_id")
+            if not isinstance(batch_id, str):
+                return None
+            batch = self.batches.get(batch_id)
+            if batch is None:
+                return None
+            return self._shared.setdefault(batch_id, SharedBudget(self, batch))
 
     def _next_dossier_id(self) -> str:
         """A fresh opaque dossier id that no dossier -- imported or created -- already holds."""
@@ -495,7 +689,7 @@ class Store:  # pylint: disable=too-many-instance-attributes
             if candidate not in self.users:
                 return candidate
 
-    def claim_build(self, dossier: Dossier) -> int | None:
+    def claim_build(self, dossier: Dossier, when: str = "") -> int | None:
         """Start a build of `dossier`, or None when one is already running."""
         with self.lock:
             if self.dossiers.get(dossier.domain) is not dossier or dossier.running:
@@ -511,12 +705,16 @@ class Store:  # pylint: disable=too-many-instance-attributes
                     "builds": copy.deepcopy(dossier.builds),
                     "history": copy.deepcopy(dossier.history),
                     "learned": dict(dossier.learned),
+                    "standing": copy.deepcopy(dossier.standing),
                     "initialised": dossier.initialised,
                 }
             dossier.running = True
             dossier.state = "building"
             dossier.generation = self.generation
-            return dossier.generation
+            dossier.job = {"time": when, "spent": 0,
+                           "generation": self.generation, "batch_id": None}
+        self.persist()
+        return dossier.generation
 
     def still_current(self, dossier: Dossier, generation: int) -> bool:
         """Whether a build may still record calls and its outcome."""
@@ -525,12 +723,19 @@ class Store:  # pylint: disable=too-many-instance-attributes
                     and dossier.running and dossier.generation == generation)
 
     def add_spend(self, dossier: Dossier, generation: int, units: int) -> None:
-        """Record what one provider call cost (or gave back) this dossier."""
+        """Record what one provider call cost (or gave back) this dossier.
+
+        The checkpoint is written at once: a process killed after a provider billed a
+        call still counts that unit in the dossier, its build and its batch (§4).
+        """
         if not units:
             return
         with self.lock:
             if self.still_current(dossier, generation):
                 dossier.spent_units = max(0, dossier.spent_units + units)
+                if dossier.job is not None:
+                    dossier.job["spent"] = max(0, dossier.job.get("spent", 0) + units)
+        self.persist()
 
     def finish_build(self, dossier: Dossier, generation: int, ready: bool,
                      pages: dict, when: str, spent: int) -> None:
@@ -551,12 +756,17 @@ class Store:  # pylint: disable=too-many-instance-attributes
                 dossier.state = "failed"
                 dossier.builds.append({"time": when, "state": "failed", "spent": spent,
                                        "fields": None, "versions": {}})
+            batch_id = (dossier.job or {}).get("batch_id")
             dossier.running = False
             dossier.committed = None
+            dossier.job = None
+            if isinstance(batch_id, str) and batch_id in self.batches:
+                batch = self.batches[batch_id]
+                batch.pending = max(0, batch.pending - 1)
             self.persist()
 
     def _fields_from_pages(self, dossier: Dossier, pages: dict, when: str) -> dict:
-        """The seven fields a build's page versions support, with `learned_at` assigned."""
+        """The eight fields a build's page versions support, with their two times."""
         rows = {name: [] for name in FIELDS}
         for url in sorted(pages):
             for candidate in pages[url]["candidates"]:
@@ -565,9 +775,15 @@ class Store:  # pylint: disable=too-many-instance-attributes
                 rows[candidate["field"]].append({**candidate, "learned_at": learned})
         fields = {}
         for name in FIELDS:
-            fields[name] = (candidates_module.executives_field(rows[name]) if name == "executives"
-                            else candidates_module.field(rows[name]))
+            if name == "executives":
+                fields[name] = candidates_module.executives_field(rows[name])
+            elif name == INVESTORS:
+                fields[name] = candidates_module.investors_field(rows[name])
+            else:
+                fields[name] = candidates_module.field(rows[name])
         self._selected_learned(dossier, fields, when)
+        dossier.standing = update_standing(dossier.fields, dossier.standing, fields, when)
+        attach_corroborated_since(fields, dossier.standing)
         return fields
 
     @staticmethod
@@ -670,16 +886,22 @@ class Store:  # pylint: disable=too-many-instance-attributes
 
     # -- export and import (§10, §3 Upgrades) -------------------------------
 
-    def export_state(self) -> dict:
-        """A snapshot of every piece of state, taken atomically."""
+    def export_state(self, durable: bool = False) -> dict:
+        """A snapshot of every piece of state, taken atomically.
+
+        `durable` is the state file's own form: it also holds the jobs of builds
+        that are running and the batches, so a restart can end those builds and
+        keep the batches' budgets. A public export never holds a running build.
+        """
         with self.lock:
-            dossiers = [dossier.state_dict() for _, dossier in sorted(self.dossiers.items())]
+            dossiers = [dossier.state_dict(durable) for _, dossier
+                        in sorted(self.dossiers.items())]
             responses = [{"user_id": user_id, "key": key, "method": method, "path": path,
                           "body": stored.body, "status": stored.status,
                           "payload": copy.deepcopy(stored.payload)}
                          for (user_id, key), entries in sorted(self.idempotency.items())
                          for (method, path), stored in sorted(entries.items())]
-            return {
+            state = {
                 "now": format_time(self._clock),
                 "users": [copy.deepcopy(user) for user in self.users.values()],
                 "tokens": dict(self.tokens),
@@ -687,8 +909,15 @@ class Store:  # pylint: disable=too-many-instance-attributes
                 "idempotency": responses,
                 "feed": copy.deepcopy(self.feed),
                 "seq": self.seq,
-                "sequences": {"user": self._user_seq, "dossier": self._dossier_seq},
+                "sequences": {"user": self._user_seq, "dossier": self._dossier_seq,
+                              "batch": self._batch_seq},
             }
+            if durable:
+                state["jobs"] = {domain: copy.deepcopy(dossier.job) for domain, dossier
+                                 in self.dossiers.items() if dossier.job is not None}
+                state["batches"] = [batch.state_dict() for _, batch
+                                    in sorted(self.batches.items())]
+            return state
 
     def export(self) -> dict:
         """`GET /_test/export`."""
@@ -716,10 +945,144 @@ class Store:  # pylint: disable=too-many-instance-attributes
             self.idempotency = responses
             self.feed = feed
             self.seq = seq
+            self.batches = {}
+            self._batch_seq = 0
+            self._shared = {}
             self._user_seq = sequences[0]
             self._dossier_seq = sequences[1]
             self._key_locks = {}
+            for dossier in self.dossiers.values():
+                _recompute_standing(dossier)
         self.persist()
+
+
+def _origins(candidates: list[dict]) -> set[str]:
+    """The distinct origins of some candidates."""
+    return {candidate.get("origin") for candidate in candidates if candidate.get("origin")}
+
+
+def _member_key(name: str, member):
+    """The JSON value that identifies one member of a field."""
+    if name == "executives":
+        return {"title": member["title"], "name": member["name"]}
+    return member
+
+
+def _member_groups(name: str, field: dict) -> dict:
+    """The candidates of each member of a field's value, keyed by the member (§4)."""
+    value = field.get("value")
+    candidates = field.get("candidates") or []
+    if value is None:
+        return {}
+    if name == "executives":
+        return {_key({"title": member["title"], "name": member["name"]}):
+                [candidate for candidate in candidates
+                 if candidate.get("title") == member["title"]
+                 and candidate.get("value") == member["name"]]
+                for member in value}
+    if name == INVESTORS:
+        return {_key(member): [candidate for candidate in candidates
+                               if candidate.get("value") == member]
+                for member in value}
+    return {_key(value): [candidate for candidate in candidates
+                          if candidates_module.same_value(candidate.get("value"), value)]}
+
+
+def _key(value) -> str:
+    """A stable text key for a member's identity."""
+    return json.dumps(value, sort_keys=True)
+
+
+def update_standing(previous_fields: dict, standing: dict, fields: dict,
+                    when: str) -> dict:
+    """Gather the standing origins of every selected value after one ready build (§4).
+
+    A selected value keeps the origins every ready build has gathered for it since
+    its latest history entry made it selected; a value selected anew starts with
+    only this build's origins. A member of `executives` or `investors` does the same
+    from the build after which it last became a member.
+    """
+    updated: dict = {}
+    for name in FIELDS:
+        groups = _member_groups(name, fields.get(name) or {})
+        if not groups:
+            updated[name] = {"members": [], "since": None}
+            continue
+        previous_groups = _member_groups(name, previous_fields.get(name) or {})
+        prior = {entry["key"]: entry
+                 for entry in (standing.get(name) or {}).get("members", [])}
+        members = []
+        for key_text, group in groups.items():
+            origins = _origins(group)
+            entry = prior.get(key_text) if key_text in previous_groups else None
+            if entry is not None:
+                origins |= set(entry.get("origins", []))
+                since = entry.get("since")
+            else:
+                since = None
+            if since is None and len(origins) >= 2:
+                since = when
+            members.append({"key": key_text, "origins": sorted(origins), "since": since})
+        since = (max((member["since"] for member in members), key=parse_time)
+                 if all(member["since"] is not None for member in members) else None)
+        updated[name] = {"members": members, "since": since}
+    return updated
+
+
+def attach_corroborated_since(fields: dict, standing: dict) -> None:
+    """Put each field's `corroborated_since` from its standing origins (§4)."""
+    for name in FIELDS:
+        if name in fields:
+            fields[name]["corroborated_since"] = (standing.get(name) or {}).get("since")
+
+
+def _refined_field(name: str, field: dict) -> dict:
+    """A field recomputed from its candidates, keeping the selected `learned_at`."""
+    candidates = field.get("candidates") if isinstance(field, dict) else None
+    candidates = candidates if isinstance(candidates, list) else []
+    if name == "executives":
+        derived = candidates_module.executives_field(candidates)
+    elif name == INVESTORS:
+        derived = candidates_module.investors_field(candidates)
+    else:
+        derived = candidates_module.field(candidates)
+    if isinstance(field, dict):
+        derived["learned_at"] = field.get("learned_at")
+    return derived
+
+
+def _recompute_standing(dossier: Dossier) -> None:
+    """Rebuild a dossier's corroboration from its builds, as an import must (§4, Upgrades).
+
+    A stage-3 export has no origins; its candidates took their URL's host as origin
+    when they were validated, and every build's candidates count as gathered at
+    that build's time. Replaying the ready builds gives each field's standing
+    origins and the earliest build after which they corroborated its value.
+    """
+    previous = empty_fields()
+    standing: dict = {}
+    latest = None
+    for build in dossier.builds:
+        if build.get("state") != "ready" or not isinstance(build.get("fields"), dict):
+            continue
+        fields = {}
+        for name in FIELDS:
+            field = build["fields"].get(name)
+            fields[name] = _refined_field(name, field if isinstance(field, dict)
+                                          else empty_fields()[name])
+        standing = update_standing(previous, standing, fields, build["time"])
+        attach_corroborated_since(fields, standing)
+        build["fields"] = fields
+        previous = fields
+        latest = fields
+    dossier.fields = {name: _refined_field(name, dossier.fields.get(name) or {})
+                      for name in FIELDS}
+    if latest is not None:
+        attach_corroborated_since(dossier.fields, standing)
+    else:
+        standing = {}
+        attach_corroborated_since(dossier.fields, standing)
+    dossier.standing = standing
 
 
 def _entry(kind: str, field: dict, when: str) -> dict:
@@ -730,9 +1093,11 @@ def _entry(kind: str, field: dict, when: str) -> dict:
 
 
 def _change_type(name: str, old: dict, new: dict) -> str:
-    """`correction` or `change` for a field whose selected value moved (§3)."""
+    """`correction` or `change` for a field whose selected value moved (§3, §4)."""
     if name == "executives":
         return _executives_type(old, new)
+    if name == INVESTORS:
+        return _investors_type(old, new)
     old_value, new_value = old.get("value"), new.get("value")
     old_from, new_from = old.get("true_from"), new.get("true_from")
     if None in (old_value, new_value, old_from, new_from):
@@ -760,6 +1125,31 @@ def _executives_type(old: dict, new: dict) -> str:
         if old_dates.get(title) is None or new_dates.get(title) is None:
             return "change"
         if new_dates[title] > old_dates[title]:
+            return "change"
+    return "correction"
+
+
+def _investors_type(old: dict, new: dict) -> str:
+    """`correction` when every name in exactly one value is a correction (§4, Investors).
+
+    A name new to the value counts as a correction when its own `true_from` and the
+    earlier value's are both not null and its is on or before the earlier one. A
+    name that left counts as a change, so a value that both gains and loses names is
+    always a `change`.
+    """
+    old_names = set(old.get("value") or [])
+    new_names = set(new.get("value") or [])
+    differing = old_names ^ new_names
+    if not differing:
+        return "change"
+    old_from = old.get("true_from")
+    candidates = new.get("candidates") or []
+    for name in differing:
+        if name not in new_names:
+            return "change"
+        group = [candidate for candidate in candidates if candidate.get("value") == name]
+        member_from = candidates_module.member_true_from(group)
+        if old_from is None or member_from is None or member_from > old_from:
             return "change"
     return "correction"
 
@@ -824,6 +1214,46 @@ def validated_state(state: dict):
     except (TypeError, ValueError):
         raise FixtureError(errors.validation("state.sequences must hold integers")) from None
     return users, tokens, dossiers, responses, (user_seq, dossier_seq), feed, seq
+
+
+def validated_batches(raw, sequences: dict, users: dict) -> tuple[dict[str, Batch], int]:
+    """The batches and batch sequence a durable state file records."""
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise FixtureError(errors.validation("state.batches must be a list"))
+    batches: dict[str, Batch] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise FixtureError(errors.validation("each state batch must be an object"))
+        batch_id, user_id = entry.get("batch_id"), entry.get("user_id")
+        budget, spent = entry.get("budget_units"), entry.get("spent_units")
+        domains, pending = entry.get("domains"), entry.get("pending", 0)
+        if not isinstance(batch_id, str) or batch_id in batches:
+            raise FixtureError(errors.validation("a state batch needs a unique id"))
+        if not isinstance(user_id, str) or user_id not in users:
+            raise FixtureError(errors.validation("a state batch's user is not known"))
+        if not isinstance(budget, int) or isinstance(budget, bool) \
+                or not 1 <= budget <= MAX_BATCH_BUDGET:
+            raise FixtureError(errors.validation("a state batch's budget is invalid"))
+        if not isinstance(spent, int) or isinstance(spent, bool) \
+                or not 0 <= spent <= budget:
+            raise FixtureError(errors.validation("a state batch's spent_units is invalid"))
+        if not isinstance(domains, list) or not domains \
+                or len(domains) > MAX_BATCH_DOMAINS \
+                or not all(isinstance(domain, str) for domain in domains):
+            raise FixtureError(errors.validation("a state batch's domains are invalid"))
+        if not isinstance(pending, int) or isinstance(pending, bool) \
+                or not 0 <= pending <= len(domains):
+            raise FixtureError(errors.validation("a state batch's pending count is invalid"))
+        batches[batch_id] = Batch(batch_id=batch_id, user_id=user_id,
+                                  budget_units=budget, domains=list(domains),
+                                  spent_units=spent, pending=pending)
+    try:
+        batch_seq = int(sequences.get("batch", len(batches)))
+    except (TypeError, ValueError):
+        raise FixtureError(errors.validation("state.sequences must hold integers")) from None
+    return batches, batch_seq
 
 
 def _validated_users(raw) -> dict[str, dict]:
@@ -897,6 +1327,8 @@ def _validated_dossiers(raw) -> dict[str, Dossier]:
             raise FixtureError(errors.validation("a state dossier needs its fields"))
         migrated = {name: migrated_field(name, fields.get(name), researched_at)
                     for name in FIELDS}
+        if "investors" not in fields:
+            migrated["investors"] = empty_fields()["investors"]
         dossier = Dossier(dossier_id=dossier_id, domain=domain,
                           state="failed" if state == "building" else state,
                           fields=migrated, researched_at=researched_at,
@@ -905,7 +1337,7 @@ def _validated_dossiers(raw) -> dict[str, Dossier]:
             dossier.builds = _validated_builds(entry.get("builds"))
             dossier.history = _validated_history(entry.get("history"), dossier.builds)
             dossier.learned = _validated_learned(entry.get("learned"))
-            dossier.initialised = bool(entry.get("initialised", dossier.builds))
+            dossier.initialised = any(build["state"] == "ready" for build in dossier.builds)
         else:
             # A stage-1 or stage-2 export has no executives candidates and no history:
             # the strongest recoverable state is one synthetic ready build at its
@@ -947,14 +1379,48 @@ def _validated_builds(raw) -> list[dict]:
         fields = entry.get("fields")
         versions = entry.get("versions") or {}
         if entry["state"] == "ready":
-            if not isinstance(fields, dict) or set(fields) != set(FIELDS):
+            if not isinstance(fields, dict) or not set(SIX) <= set(fields) <= set(FIELDS):
                 raise FixtureError(errors.validation("a ready build needs its fields"))
             if not isinstance(versions, dict):
                 raise FixtureError(errors.validation("a ready build's versions must be an object"))
+            fields = {name: migrated_field(name, fields.get(name), entry["time"])
+                      for name in FIELDS}
         builds.append({"time": entry["time"], "state": entry["state"], "spent": spent,
-                       "fields": copy.deepcopy(fields) if fields else None,
-                       "versions": copy.deepcopy(versions)})
+                       "fields": fields if entry["state"] == "ready" else None,
+                       "versions": _validated_versions(versions)
+                       if entry["state"] == "ready" else {}})
     return builds
+
+
+def _validated_versions(raw: dict) -> dict:
+    """The page versions a build gathered, with each candidate's origin defaulted."""
+    versions = {}
+    for url, version in raw.items():
+        if not isinstance(url, str) or not isinstance(version, dict):
+            raise FixtureError(errors.validation("a ready build's version is malformed"))
+        true_from = version.get("true_from")
+        if true_from is not None:
+            try:
+                parse_day(true_from)
+            except ValueError:
+                raise FixtureError(errors.validation("a version's true_from is malformed")) \
+                    from None
+        candidates = []
+        for candidate in version.get("candidates") or []:
+            if not isinstance(candidate, dict) or candidate.get("field") not in FIELDS:
+                raise FixtureError(errors.validation("a version's candidate is malformed"))
+            name = candidate["field"]
+            for key in ("url", "excerpt", "provider"):
+                if not isinstance(candidate.get(key), str) or not candidate.get(key):
+                    raise FixtureError(errors.validation(
+                        "a version's candidate needs its url, excerpt and provider"))
+            prepared = copy.deepcopy(candidate)
+            origin = prepared.get("origin")
+            if not isinstance(origin, str) or not origin:
+                prepared["origin"] = pages_module.host_of(prepared["url"])
+            candidates.append(prepared)
+        versions[url] = {"true_from": true_from, "candidates": candidates}
+    return versions
 
 
 def _validated_history(raw, builds: list[dict]) -> dict:
@@ -1081,8 +1547,7 @@ def migrated_field(name: str, value, researched_at) -> dict:
     `aggregator` and the dossier's `researched_at` as its retrieval time.
     """
     if value is None:
-        return {"value": None, "status": "unknown", "citations": [], "candidates": [],
-                "true_from": None, "learned_at": None}
+        return empty_fields()[name]
     if not isinstance(value, dict) or not isinstance(value.get("citations", []), list):
         raise FixtureError(errors.validation(f"a state field {name} is malformed"))
     imported = value.get("candidates")
@@ -1095,6 +1560,8 @@ def migrated_field(name: str, value, researched_at) -> dict:
             published_at=candidates_module.legacy_published(value.get("published_at")))
     if name == "executives":
         derived = candidates_module.executives_field(candidates)
+    elif name == INVESTORS:
+        derived = candidates_module.investors_field(candidates)
     else:
         derived = candidates_module.field(candidates)
     if "learned_at" in value:
@@ -1149,6 +1616,13 @@ def _validated_candidate(name: str, candidate) -> dict:
         except ValueError:
             raise FixtureError(
                 errors.validation(f"a state candidate of {name} has a bad true_from")) from None
+    if true_from is None and published is not None:
+        # A stage-2 export records a page's publication time but not its Effective
+        # line, so the UTC date of that time is the best recoverable `true_from`
+        # (§3, Upgrades: a page version's true_from follows from those lines).
+        true_from = datetime.fromisoformat(
+            published.upper().replace("Z", "+00:00")).astimezone(
+                timezone.utc).date().isoformat()
     learned = candidate.get("learned_at")
     if learned is not None:
         try:
@@ -1159,12 +1633,25 @@ def _validated_candidate(name: str, candidate) -> dict:
     title = candidate.get("title")
     if name == "executives" and title not in TITLES:
         raise FixtureError(errors.validation("an executives candidate needs a title"))
+    origin = candidate.get("origin")
+    if origin is not None:
+        if not isinstance(origin, str):
+            raise FixtureError(errors.validation(f"a state candidate of {name} has a bad origin"))
+        try:
+            if normalised_or_raise(origin) != origin:
+                raise InvalidDomain(origin)
+        except InvalidDomain:
+            raise FixtureError(errors.validation(
+                f"a state candidate of {name} has a bad origin")) from None
+    if not isinstance(origin, str) or not origin:
+        origin = pages_module.host_of(candidate["url"])
     return {"value": candidate.get("value"), "url": candidate["url"],
             "excerpt": candidate["excerpt"], "provider": candidate["provider"],
             "kind": kind if isinstance(kind, str) else None,
             "published_at": published, "retrieved_at": retrieved,
             "true_from": true_from, "learned_at": learned or retrieved,
-            "title": title if name == "executives" else None, "selected": False}
+            "title": title if name == "executives" else None, "selected": False,
+            "origin": origin}
 
 
 def _validated_responses(raw) -> dict[tuple[str, str], dict[tuple[str, str], StoredResponse]]:

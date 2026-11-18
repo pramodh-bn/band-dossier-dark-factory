@@ -218,7 +218,7 @@ def test_a_built_dossier_holds_the_six_supported_fields(world):
     world.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
     body = wait_ready(world, ACME)
     assert body["state"] == "ready" and body["researched_at"] == NOW
-    assert set(body["fields"]) == set(FIELDS) | {"executives"}
+    assert set(body["fields"]) == set(FIELDS) | {"executives", "investors"}
     values = {name: body["fields"][name]["value"] for name in FIELDS}
     assert values == {"legal_name": "Acme Robotics, Inc.", "hq_city": "Lisbon",
                       "ceo": "Dana Ruiz", "founded_year": 2014,
@@ -318,7 +318,9 @@ def test_a_failed_build_spends_nothing_and_keeps_fields_unknown(world):
     for name in FIELDS:
         assert body["fields"][name] == {"value": None, "status": "unknown",
                                         "citations": [], "candidates": [],
-                                        "true_from": None, "learned_at": None}
+                                        "true_from": None, "learned_at": None,
+                                        "origins": [], "corroborated": False,
+                                        "corroborated_since": None}
 
 
 def test_a_failed_refresh_keeps_the_last_ready_fields(world):

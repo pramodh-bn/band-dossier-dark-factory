@@ -59,7 +59,7 @@ def test_concurrent_reads_during_a_build_are_consistent(world):
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         bodies = list(pool.map(read, range(20)))
     for body in bodies:
-        assert set(body["fields"]) == set(FIELDS) | {"executives"}
+        assert set(body["fields"]) == set(FIELDS) | {"executives", "investors"}
         assert body["state"] in ("building", "ready")
         if body["state"] == "ready":
             assert body["fields"]["hq_city"]["value"] in ("Lisbon", "Porto")

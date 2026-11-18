@@ -86,18 +86,28 @@ def refused(error: BaseException) -> bool:
 
 
 class Budget:
-    """One build's spending, never above §9's 80 units, charged before each call."""
+    """One build's spending, never above §9's 80 units, charged before each call.
 
-    def __init__(self, limit: int, on_spend) -> None:
+    A batch's build also spends from the batch's shared budget: a call is made only
+    when both this build's 80 units and the batch's remaining units cover it.
+    """
+
+    def __init__(self, limit: int, on_spend, shared=None) -> None:
         self.limit = limit
         self.on_spend = on_spend
+        self.shared = shared
         self.spent = 0
+        #: True when a call was refused because the batch's shared budget was spent.
+        self.blocked_by_shared = False
         self._lock = threading.Lock()
 
     def reserve(self, units: int) -> bool:
-        """Claim `units` for a call; False when the call would take spending over the limit."""
+        """Claim `units` for a call; False when the call would take spending over a limit."""
         with self._lock:
             if self.spent + units > self.limit:
+                return False
+            if self.shared is not None and not self.shared.reserve(units):
+                self.blocked_by_shared = True
                 return False
             self.spent += units
         self.on_spend(units)
@@ -107,6 +117,8 @@ class Budget:
         """Give back the units of a call the provider refused."""
         with self._lock:
             self.spent -= units
+            if self.shared is not None:
+                self.shared.refund(units)
         self.on_spend(-units)
 
 
@@ -124,6 +136,8 @@ class Calls:
     def __init__(self, budget: Budget, seconds: float = BUILD_BUDGET_SECONDS) -> None:
         self.budget = budget
         self.succeeded = False
+        #: How many provider calls were actually sent (a budget-blocked call is not one).
+        self.attempted = 0
         self.deadline = time.monotonic() + seconds
         self._lock = threading.Lock()
 
@@ -136,9 +150,10 @@ class Calls:
         """Whether the build may start one more call inside §8's 300-second bound."""
         return time.monotonic() < self.deadline
 
-    def _wait_before(self, attempt: int) -> bool:
+    def _wait_before(self, attempt: int, delay: float | None = None) -> bool:
         """Sleep the backoff before `attempt` (1-based), or False when it would not fit."""
-        delay = BACKOFF[attempt] if attempt < len(BACKOFF) else BACKOFF[-1]
+        if delay is None:
+            delay = BACKOFF[attempt] if attempt < len(BACKOFF) else BACKOFF[-1]
         if delay <= 0:
             return True
         if self.deadline - time.monotonic() <= delay:
@@ -163,11 +178,14 @@ class Calls:
 
     def _call(self, cost: int, invoke, *, retry_no_answer: bool = True):
         """Run one provider call and its bounded retries; None when every attempt failed."""
+        delay = 0.0
         for attempt in range(ATTEMPTS):
-            if attempt and not self._wait_before(attempt):
+            if attempt and not self._wait_before(attempt, delay):
                 return None
             if not self._ready() or not self.budget.reserve(cost):
                 return None
+            with self._lock:
+                self.attempted += 1
             try:
                 answer = invoke()
             except Exception as exc:  # noqa: BLE001 - a provider failure is a failed call, not a 5xx
@@ -176,6 +194,11 @@ class Calls:
                     self.budget.refund(cost)
                 if not self._retryable(exc, attempt, refused_it, retry_no_answer):
                     return None
+                # Only a 429 requires a pause: the same call repeated within a second is
+                # refused again. A transient 5xx may be tried again at once, so a build
+                # whose calls all fail still ends inside §8's ten seconds.
+                status = getattr(exc, "status_code", None)
+                delay = BACKOFF[attempt] if status == 429 else 0.05
                 continue
             self._note(True)
             return answer

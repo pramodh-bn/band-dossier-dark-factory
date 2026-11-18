@@ -81,7 +81,9 @@ def test_a_stage_one_export_becomes_candidates(client, world):
         if original["value"] is None:
             assert field == {"value": None, "status": "unknown", "citations": [],
                              "candidates": [], "true_from": None,
-                             "learned_at": None}, name
+                             "learned_at": None, "origins": [],
+                             "corroborated": False,
+                             "corroborated_since": None}, name
             continue
         assert field["candidates"], name
         assert {candidate["value"] for candidate in field["candidates"]} == {original["value"]}
@@ -136,7 +138,8 @@ def test_every_stored_citation_becomes_one_candidate(client, world):
         "value": "Dana Ruiz", "url": "https://acme-robotics.test/team",
         "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
         "provider": "nimble", "kind": None, "published_at": None,
-        "retrieved_at": NOW, "true_from": None, "learned_at": NOW, "selected": True}]
+        "retrieved_at": NOW, "true_from": None, "learned_at": NOW, "selected": True,
+        "origin": "acme-robotics.test"}]
     assert restored["fields"]["ceo"]["citations"] == [{
         "url": "https://acme-robotics.test/team",
         "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
@@ -165,7 +168,9 @@ def test_a_legacy_export_cannot_grow_candidates_it_did_not_cite(client, world):
         if name != "hq_city":
             assert restored["fields"][name] == {"value": None, "status": "unknown",
                                                "citations": [], "candidates": [],
-                                               "true_from": None, "learned_at": None}
+                                               "true_from": None, "learned_at": None,
+                                               "origins": [], "corroborated": False,
+                                               "corroborated_since": None}
 
 
 def test_a_legacy_kind_and_publication_time_are_kept_when_present(client, world):

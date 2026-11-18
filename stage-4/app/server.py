@@ -46,6 +46,45 @@ def required_domain(data: dict) -> str:
         raise errors.validation("domain is not a valid host name") from None
 
 
+def batch_request(data: dict) -> tuple[list[str], int]:
+    """`domains` and `budget_units` for `POST /batches` (§4, Batches).
+
+    A budget that is not an integer is 422 whatever its JSON type -- the batch
+    table takes precedence over §5's 400 for a field of the wrong type. A `domains`
+    that is not a list is a body of the wrong shape (400); each entry is normalised
+    and must be a valid, unique host name (422).
+    """
+    if "budget_units" in data:
+        budget = data["budget_units"]
+        if isinstance(budget, bool) or not isinstance(budget, int):
+            raise errors.validation("budget_units must be an integer from 1 to 100000")
+        if not 1 <= budget <= state.MAX_BATCH_BUDGET:
+            raise errors.validation("budget_units must be an integer from 1 to 100000")
+    else:
+        raise errors.validation("budget_units is required")
+    if "domains" not in data:
+        raise errors.validation("domains is required")
+    raw_domains = data["domains"]
+    if not isinstance(raw_domains, list):
+        raise errors.malformed("domains must be a list")
+    if not raw_domains or len(raw_domains) > state.MAX_BATCH_DOMAINS:
+        raise errors.validation("domains must hold 1 to 50 entries")
+    domains: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_domains:
+        if not isinstance(raw, str):
+            raise errors.validation("each domain must be a host name")
+        try:
+            domain = normalised_or_raise(raw)
+        except InvalidDomain:
+            raise errors.validation("a domain is not a valid host name") from None
+        if domain in seen:
+            raise errors.validation("two domains are the same after normalisation")
+        seen.add(domain)
+        domains.append(domain)
+    return domains, budget
+
+
 def path_domain(segment: str) -> str:
     """A domain from a path segment, normalised, 422 when it is not a valid host name."""
     try:
@@ -139,6 +178,12 @@ class Application:
         if path == "/auth/login" and method == "POST":
             return 200, self.store.login(parse_object(raw))
         segments = [segment for segment in path.split("/") if segment]
+        if segments == ["batches"] and method == "POST":
+            user = self.authenticate(headers)
+            return self.create_batch(user, path, headers, raw, when)
+        if len(segments) == 2 and segments[0] == "batches" and method == "GET":
+            user = self.authenticate(headers)
+            return 200, self.store.batch_view(segments[1], user["id"])
         if segments == ["dossiers"] and method == "POST":
             user = self.authenticate(headers)
             return self.create_dossier(user, path, headers, raw, when)
@@ -194,6 +239,24 @@ class Application:
 
     # -- the two write paths (§7, §8) --------------------------------------
 
+    def create_batch(self, user: dict, path: str, headers, raw: bytes, when: str):
+        """`POST /batches`: research several companies under one shared budget (§4)."""
+        key = state.parse_idempotency_key(headers.get("Idempotency-Key"))
+        data = parse_object(raw)
+        fingerprint = state.canonical({"domains": data.get("domains"),
+                                       "budget_units": data.get("budget_units")})
+        with self.store.key_lock(user["id"], key):
+            stored = self.store.claimed(user["id"], key, "POST", path, fingerprint)
+            if stored is not None:
+                return 200, stored.payload
+            domains, budget_units = batch_request(data)
+            batch, started = self.store.create_batch(user["id"], domains, budget_units, when)
+            payload = self.store.view_batch(batch)
+            for dossier in started:
+                self.builder.start(dossier, dossier.generation, when)
+            self.store.remember(user["id"], key, "POST", path, fingerprint, 202, payload)
+            return 202, payload
+
     def create_dossier(self, user: dict, path: str, headers, raw: bytes, when: str):
         """`POST /dossiers`: create and build a dossier, or report the existing one."""
         key = state.parse_idempotency_key(headers.get("Idempotency-Key"))
@@ -204,7 +267,7 @@ class Application:
             if stored is not None:
                 return 200, stored.payload
             domain = required_domain(data)
-            payload, dossier, created = self.store.create_or_existing(domain)
+            payload, dossier, created = self.store.create_or_existing(domain, when)
             status = 202 if created else 200
             if created:
                 self.builder.start(dossier, dossier.generation, when)
@@ -223,7 +286,7 @@ class Application:
             dossier = self.store.dossier(domain)
             if dossier is None:
                 raise errors.not_found("no dossier for that domain")
-            generation = self.store.claim_build(dossier)
+            generation = self.store.claim_build(dossier, when)
             payload = {"dossier_id": dossier.dossier_id, "domain": dossier.domain,
                        "state": "building"}
             if generation is not None:

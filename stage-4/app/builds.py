@@ -100,7 +100,8 @@ class Builder:
         """The build proper; any failure ends it as `failed` rather than leaving it running."""
         domain = dossier.domain
         budget = providers.Budget(
-            BUDGET_UNITS, lambda units: self.store.add_spend(dossier, generation, units))
+            BUDGET_UNITS, lambda units: self.store.add_spend(dossier, generation, units),
+            shared=self.store.shared_budget(dossier))
         calls = providers.Calls(budget)
         page_text: dict[str, str] = {}
         found: list[str] = []
@@ -150,11 +151,26 @@ class Builder:
             for url in page_priority(found + cited, snippets, cited, domain)[:max(slots, 0)]:
                 pool.submit(gather, url)
 
+        # 4. Every page's origin (§4, Origins). A Canonical link to a page this build
+        #    did not read is fetched through the same provider, within budget; a page no
+        #    provider serves falls back to its host. Fetched originals answer lineage
+        #    only: evidence is still the pages the searches and research cite.
+        lineage_texts = dict(page_text)
+
+        def fetch_lineage(url: str) -> str | None:
+            if not self.store.still_current(dossier, generation):
+                return None
+            return calls.extract(url)
+
+        lineage = pages_module.Lineage(lineage_texts, fetch_lineage, domain)
+        origins = {url: lineage.origin(url) for url in sorted(page_text)}
+
         pages: dict[str, dict] = {}
         for url in sorted(page_text):
             text = page_text[url]
             meta = pages_module.metadata(text, url, domain)
             date = pages_module.true_from(text)
+            origin = origins[url]
             found: list[dict] = []
             for name, pairs in evidence.page_values(text, domain).items():
                 for value, excerpt in pairs:
@@ -163,7 +179,8 @@ class Builder:
                                   "kind": meta["kind"],
                                   "published_at": meta["published_at"],
                                   "retrieved_at": when, "true_from": date,
-                                  "learned_at": None, "selected": False})
+                                  "learned_at": None, "selected": False,
+                                  "origin": origin})
             for title, pairs in evidence.page_executives(text, domain).items():
                 for value, excerpt in pairs:
                     found.append({"field": "executives", "title": title, "value": value,
@@ -172,9 +189,22 @@ class Builder:
                                   "kind": meta["kind"],
                                   "published_at": meta["published_at"],
                                   "retrieved_at": when, "true_from": date,
-                                  "learned_at": None, "selected": False})
+                                  "learned_at": None, "selected": False,
+                                  "origin": origin})
+            for value, excerpt in evidence.page_investors(text, domain):
+                found.append({"field": "investors", "value": value, "url": url,
+                              "excerpt": excerpt, "provider": providers.PROVIDER,
+                              "kind": meta["kind"],
+                              "published_at": meta["published_at"],
+                              "retrieved_at": when, "true_from": date,
+                              "learned_at": None, "selected": False,
+                              "origin": origin})
             # Every rendered page is a version, even one that states no value: an empty
             # version still ends or replaces the older versions of its URL (§3, /values).
             pages[url] = {"true_from": date, "candidates": found}
-        self.store.finish_build(dossier, generation, calls.succeeded, pages, when,
+        # A batch build that the shared budget kept from even starting completes with
+        # what it has; a build whose calls were all attempted and all failed is `failed`
+        # (§4, Batches; §4, Provider failure).
+        ready = calls.succeeded or (budget.blocked_by_shared and calls.attempted == 0)
+        self.store.finish_build(dossier, generation, ready, pages, when,
                                 budget.spent)

@@ -14,7 +14,7 @@ from app import evidence, pages, store
 from conftest import FIELDS, NOW, wait_ready
 
 ACME = "acme-robotics.test"
-ALL = FIELDS + ("executives",)
+ALL = FIELDS + ("executives", "investors")
 MIDDLE = "2026-04-01T09:00:00+00:00"
 LATER = "2026-05-01T09:00:00+00:00"
 
@@ -110,7 +110,8 @@ def test_executives_are_unknown_without_a_title(world):
     body = build(world, "second-company.test")
     assert body["fields"]["executives"] == {
         "value": None, "status": "unknown", "citations": [], "candidates": [],
-        "true_from": None, "learned_at": None}
+        "true_from": None, "learned_at": None, "origins": [],
+        "corroborated": False, "corroborated_since": None}
 
 
 def test_executive_statements_use_the_titles_own_phrases(world):

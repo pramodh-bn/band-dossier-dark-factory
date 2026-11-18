@@ -8,11 +8,17 @@ from app import pages
 DOMAIN = "acme-robotics.test"
 
 
-@pytest.mark.parametrize("kind", ["own", "filing", "news", "aggregator"])
+@pytest.mark.parametrize("kind", ["filing", "news", "aggregator"])
 def test_a_stated_kind_is_the_kind(kind):
     """A `Kind` line naming one of the four is the page's kind."""
     text = f"Kind: {kind}\n\nAcme Robotics was founded in 2014."
     assert pages.kind_of(text, "https://elsewhere.test/x", DOMAIN) == kind
+
+
+def test_a_stated_own_page_is_own_only_for_its_registrant():
+    """`Kind: own` on a page not registered to the company is an aggregator (§4)."""
+    text = "Kind: own\n\nAcme Robotics was founded in 2014."
+    assert pages.kind_of(text, "https://elsewhere.test/x", DOMAIN) == "aggregator"
 
 
 @pytest.mark.parametrize("stated", ["", "Kind: blog", "Kind:", "Kind: OWN"])

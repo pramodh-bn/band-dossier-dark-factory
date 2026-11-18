@@ -30,6 +30,9 @@ class Page:
     served: str = ""
     browser: str | None = None
     epochs: tuple = (0,)
+    registrant: str | None = None
+    canonical: str | None = None
+    first_published_by: str | None = None
 
     def text(self, render: bool) -> str:
         """The text served for this page, with its header lines."""
@@ -38,6 +41,12 @@ class Page:
             headers.append(f"Published: {self.published}")
         if self.effective:
             headers.append(f"Effective: {self.effective}")
+        if self.registrant:
+            headers.append(f"Registrant: {self.registrant}")
+        if self.canonical:
+            headers.append(f"Canonical: {self.canonical}")
+        if self.first_published_by:
+            headers.append(f"First-Published-By: {self.first_published_by}")
         prose = self.browser if (render and self.browser is not None) else self.served
         return "\n".join(headers) + "\n\n" + prose
 
@@ -174,6 +183,85 @@ PAGES["huge-group.test"] = {
         kind="filing", published="2025-06-01T00:00:00+00:00", searchable=False,
         epochs=(0, 1, 2, 3, 4, 5),
         served="Huge Group trades under the registered name Huge Group Holdings Ltd.")),
+}
+
+#: A company whose pages exercise every lineage rule and the investors field.
+PAGES["origin-works.test"] = {
+    "https://origin-works.test/about": _pages(Page(
+        kind="own", registrant="origin-works.test", published="2026-01-10T00:00:00+00:00",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://origin-works.test/legal": _pages(Page(
+        kind="own", registrant="origin-works.test", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works trades under the registered name Origin Works Ltd.")),
+    "https://registry.test/origin-works": _pages(Page(
+        kind="filing", registrant="registry.test", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works trades under the registered name Origin Works Ltd.")),
+    "https://origin-works.test/team": _pages(Page(
+        kind="own", registrant="origin-works.test", published="2026-01-10T00:00:00+00:00",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served=("Origin Works is backed by Bluebird Capital.\n"
+                "Origin Works raised $40M in a round led by General Atlantic.\n"
+                "Origin Works employs about 120 people."))),
+    "https://north-one.test/origin-works": _pages(Page(
+        kind="aggregator", registrant="north-one.test", published="2026-02-01T00:00:00+00:00",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Northwind Ventures is an investor in Origin Works.")),
+    "https://north-two.test/origin-works": _pages(Page(
+        kind="aggregator", registrant="north-two.test", published="2026-02-05T00:00:00+00:00",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Northwind Ventures is an investor in Origin Works.")),
+    "https://east-only.test/origin-works": _pages(Page(
+        kind="aggregator", registrant="east-only.test", published="2026-02-06T00:00:00+00:00",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Eastwind Partners participated in a round for Origin Works.")),
+    "https://syndicate.test/origin-works-about": _pages(Page(
+        kind="news", registrant="syndicate.test", canonical="https://origin-works.test/about",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://copychain-one.test/origin-works": _pages(Page(
+        kind="news", registrant="copychain-one.test",
+        canonical="https://copychain-two.test/origin-works", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://copychain-two.test/origin-works": _pages(Page(
+        kind="news", registrant="copychain-two.test",
+        canonical="https://copychain-three.test/origin-works", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://copychain-three.test/origin-works": _pages(Page(
+        kind="news", registrant="copychain-three.test",
+        canonical="https://origin-works.test/about", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://lookalike.test/about": _pages(Page(
+        kind="own", registrant="domainhold.test", epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works is headquartered in Ghent.")),
+    "https://missing.test/origin-works": _pages(Page(
+        kind="news", registrant="missing.test", canonical="https://nowhere.test/origin-works",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+    "https://firstpub.test/origin-works": _pages(Page(
+        kind="news", registrant="firstpub.test", first_published_by="wireorigin.test",
+        epochs=(0, 1, 2, 3, 4, 5),
+        served="Origin Works was founded in 2015.")),
+}
+
+#: An investors value that gains a name (a correction) and then loses one (a change).
+PAGES["investors-change.test"] = {
+    "https://investors-change.test/team": _pages(
+        Page(kind="own", registrant="investors-change.test",
+             published="2026-01-10T00:00:00+00:00", epochs=(0,),
+             served="Investors Change is backed by Bluebird Capital."),
+        Page(kind="own", registrant="investors-change.test",
+             published="2026-01-10T00:00:00+00:00", effective="2025-12-01", epochs=(1,),
+             served=("Investors Change is backed by Bluebird Capital.\n"
+                     "Investors Change is backed by Northwind Ventures.")),
+        Page(kind="own", registrant="investors-change.test",
+             published="2026-01-10T00:00:00+00:00", epochs=(2,),
+             served="Investors Change is backed by Northwind Ventures."),
+    ),
+    "https://investors-change.test/about": _pages(Page(
+        kind="own", registrant="investors-change.test",
+        published="2026-01-01T00:00:00+00:00", epochs=(0, 1, 2, 3, 4, 5),
+        served="Investors Change was founded in 2014.")),
 }
 
 #: domain -> research answer per epoch: (field, value, url, excerpt)

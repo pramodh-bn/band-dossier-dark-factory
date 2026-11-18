@@ -1,4 +1,4 @@
-# Dossier, stage 3: a containerised HTTP service with a browser product.
+# Dossier, stage 4: a containerised HTTP service with a browser product.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \

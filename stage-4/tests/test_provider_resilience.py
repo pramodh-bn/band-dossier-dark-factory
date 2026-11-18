@@ -19,7 +19,8 @@ ACME = "acme-robotics.test"
 EXPECTED = {"legal_name": "Acme Robotics, Inc.", "hq_city": "Lisbon", "ceo": "Dana Ruiz",
             "founded_year": 2014, "headcount_range": "51-200", "funding_total": 12_000_000,
             "executives": [{"title": "cfo", "name": "Dana Ruiz"},
-                           {"title": "cto", "name": "Ben Okafor"}]}
+                           {"title": "cto", "name": "Ben Okafor"}],
+            "investors": None}
 
 
 def key() -> str:
