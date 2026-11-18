@@ -181,3 +181,67 @@ def test_the_state_file_is_written_atomically(state_path, monkeypatch):
         leftovers = [path.name for path in state_path.parent.iterdir()
                      if path.name.startswith(".state-")]
         assert leftovers == []
+
+
+def test_the_state_file_never_holds_a_building_dossier(state_path, monkeypatch):
+    """While a build runs, every persisted snapshot is a whole, non-building state."""
+    monkeypatch.setattr(providers, "Calls", fakeweb.FakeCalls)
+    fakeweb.reset()
+    with running(state_path) as base:
+        assert httpx.post(f"{base}/_test/reset", json=fixture()).status_code == 204
+        client = sign_in(base)
+        client.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+        wait_ready(client, ACME)
+        before = json.loads(state_path.read_text(encoding="utf-8"))
+        fakeweb.DELAY = 1.0
+        fakeweb.EPOCH = 1
+        client.post("/_test/clock", json={"now": "2026-05-01T09:00:00+00:00"})
+        client.post(f"/dossiers/{ACME}/refresh", headers={"Idempotency-Key": key()})
+        seen = 0
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            building = client.get(f"/dossiers/{ACME}").json()["state"] == "building"
+            body = json.loads(state_path.read_text(encoding="utf-8"))
+            dossier = body["dossiers"][0]
+            assert dossier["state"] != "building", dossier["state"]
+            if not building:
+                break
+            assert len(dossier["builds"]) == len(before["dossiers"][0]["builds"])
+            assert dossier["history"] == before["dossiers"][0]["history"]
+            assert body["feed"] == before["feed"]
+            seen += 1
+            time.sleep(0.05)
+        assert seen > 0, "the build finished before a snapshot could be read"
+        after = json.loads(state_path.read_text(encoding="utf-8"))
+        assert len(after["dossiers"][0]["builds"]) == 2
+        assert [entry["type"] for entry in after["dossiers"][0]["history"]["hq_city"]] == \
+            ["initial", "change"]
+        assert len(after["feed"]) == 1
+
+
+def test_an_interrupted_build_recovers_to_a_non_building_state(state_path, monkeypatch):
+    """A state file written mid-build loads as the last committed state, and refreshes work."""
+    monkeypatch.setattr(providers, "Calls", fakeweb.FakeCalls)
+    fakeweb.reset()
+    with running(state_path) as base:
+        assert httpx.post(f"{base}/_test/reset", json=fixture()).status_code == 204
+        client = sign_in(base)
+        client.post("/dossiers", json={"domain": ACME}, headers={"Idempotency-Key": key()})
+        wait_ready(client, ACME)
+        committed = json.loads(state_path.read_text(encoding="utf-8"))
+        token = client.headers["Authorization"]
+    # a build that was running when the process died leaves the committed state behind
+    with running(state_path) as base:
+        client = httpx.Client(base_url=base, timeout=20, headers={"Authorization": token})
+        body = client.get(f"/dossiers/{ACME}").json()
+        assert body["state"] == "ready"
+        assert body["fields"] == committed["dossiers"][0]["fields"]
+        assert client.get("/changes").json()["changes"] == []
+        fakeweb.EPOCH = 1
+        client.post("/_test/clock", json={"now": "2026-05-01T09:00:00+00:00"})
+        assert client.post(f"/dossiers/{ACME}/refresh",
+                           headers={"Idempotency-Key": key()}).status_code == 202
+        assert wait_ready(client, ACME)["fields"]["hq_city"]["value"] == "Porto"
+        assert [entry["type"] for entry in
+                client.get(f"/dossiers/{ACME}/history").json()["fields"]["hq_city"]] == \
+            ["initial", "change"]

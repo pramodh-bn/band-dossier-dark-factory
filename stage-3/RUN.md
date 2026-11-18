@@ -113,9 +113,22 @@ python -m tests.validate_candidates --corpus <set> --challenge <dossier challeng
   the dossier's `researched_at`, with one `initial` history entry per valued field
   and an empty feed. The stage-2 service did not export its earlier builds, so
   those are irrecoverable; the synthetic build is the strongest recoverable
-  history.
+  history. Its spending is the exported dossier's `spent_units`, so `?as_of=` at
+  or after that build reports that total and an earlier `as_of` is 404.
 - **Stage 1** exports become candidates from their citations, learned at their
   retrieval time, in the same synthetic build.
+
+## Restarts and interrupted builds
+
+The state file is written under the state lock after every mutation, so it always
+holds a whole state: a dossier is never persisted as `building`, and a build's
+history and feed entries are written together with its outcome or not at all.
+
+A build interrupted by an abrupt stop therefore recovers to a defined
+non-building state — the dossier's last committed state, or `failed` with unknown
+fields when no build had completed — and the next refresh starts a fresh build.
+Nothing is left stuck `building`, no partial or duplicate history or feed entry is
+appended, and the last committed state stays readable.
 
 Accounts, tokens, dossier ids, spending and completed idempotent responses survive
 every import. An imported dossier has no `executives` candidates, so that field is
