@@ -209,7 +209,81 @@ def test_an_earlier_true_from_is_a_correction(world):
     assert kind == "correction"
 
 
-def test_executives_history_and_feed_are_typed_by_title(world):
+def test_a_selected_value_keeps_the_build_that_selected_it(world):
+    """Flip-flop 0→1→0: the value returning gets the build that selected it again."""
+    first = build(world)
+    assert first["fields"]["ceo"]["value"] == "Dana Ruiz"
+    assert first["fields"]["ceo"]["learned_at"] == NOW
+    move_on(world, epoch=5, now="2026-04-01T09:00:00+00:00")
+    middle = refresh(world)
+    assert middle["fields"]["ceo"]["value"] == "Nadia Varga"
+    assert middle["fields"]["ceo"]["learned_at"] == "2026-04-01T09:00:00+00:00"
+    move_on(world, epoch=1, now=LATER)
+    back = refresh(world)
+    assert back["fields"]["ceo"]["value"] == "Dana Ruiz"
+    assert back["fields"]["ceo"]["learned_at"] == LATER
+    history = world.get(f"/dossiers/{ACME}/history").json()["fields"]["ceo"]
+    assert [entry["value"] for entry in history] == ["Dana Ruiz", "Nadia Varga", "Dana Ruiz"]
+    assert history[-1]["learned_at"] == back["fields"]["ceo"]["learned_at"]
+    at_middle = world.get(f"/dossiers/{ACME}",
+                          params={"as_of": "2026-04-02T09:00:00+00:00"}).json()
+    assert at_middle["fields"]["ceo"]["value"] == "Nadia Varga"
+    assert at_middle["fields"]["ceo"]["learned_at"] == "2026-04-01T09:00:00+00:00"
+
+
+def test_a_refresh_that_keeps_the_value_keeps_its_learned_at(world):
+    """A later build with the same selection leaves the selected `learned_at` alone."""
+    build(world)
+    again = refresh(world)
+    assert again["fields"]["ceo"]["value"] == "Dana Ruiz"
+    assert again["fields"]["ceo"]["learned_at"] == NOW
+    assert again["fields"]["hq_city"]["learned_at"] == NOW
+
+
+def test_the_selected_learned_at_differs_from_the_candidates_first_gather(world):
+    """A candidate keeps its first-gather time while the field keeps the selection time."""
+    first = build(world)
+    candidate_learned = {candidate["url"]: candidate["learned_at"]
+                         for candidate in first["fields"]["hq_city"]["candidates"]}
+    move_on(world, epoch=3, now=LATER)          # Braga: a new value on the same page
+    second = refresh(world)
+    assert second["fields"]["hq_city"]["value"] == "Braga"
+    assert second["fields"]["hq_city"]["learned_at"] == LATER
+    for name in ("legal_name", "founded_year", "headcount_range", "funding_total"):
+        for candidate in second["fields"][name]["candidates"]:
+            if candidate["url"] in candidate_learned:
+                assert candidate["learned_at"] == candidate_learned[candidate["url"]], name
+
+
+def test_a_change_at_the_same_clock_uses_that_clock(world):
+    """Two builds with the same clock: a selection change takes that same time."""
+    build(world)
+    move_on(world, epoch=1, now=NOW)             # same clock, different value
+    changed = refresh(world)
+    assert changed["fields"]["hq_city"]["value"] == "Porto"
+    assert changed["fields"]["hq_city"]["learned_at"] == NOW
+    entry = world.get(f"/dossiers/{ACME}/history").json()["fields"]["hq_city"][-1]
+    assert entry["learned_at"] == NOW
+    assert world.get(f"/dossiers/{ACME}",
+                     params={"as_of": NOW}).json()["fields"]["hq_city"]["value"] == "Porto"
+
+
+def test_executives_learned_at_follows_its_selection(world):
+    """The executives field's learned_at moves with the build that changed a title."""
+    build(world)
+    assert build_first_learned(world) == NOW
+    move_on(world, epoch=4, now=LATER)            # the CFO changes
+    after = refresh(world)
+    assert after["fields"]["executives"]["value"][0] == {"title": "cfo", "name": "Ana Silva"}
+    assert after["fields"]["executives"]["learned_at"] == LATER
+    assert [candidate["learned_at"] for candidate in
+            after["fields"]["executives"]["candidates"]] != [None] * len(
+                after["fields"]["executives"]["candidates"])
+
+
+def build_first_learned(world) -> str | None:
+    """The executives field's learned_at in the dossier as it stands."""
+    return world.get(f"/dossiers/{ACME}").json()["fields"]["executives"]["learned_at"]
     """A later build that moves a title records the array and a per-title type."""
     build(world)
     move_on(world, epoch=4)                     # the CFO changes

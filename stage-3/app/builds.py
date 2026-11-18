@@ -173,7 +173,8 @@ class Builder:
                                   "published_at": meta["published_at"],
                                   "retrieved_at": when, "true_from": date,
                                   "learned_at": None, "selected": False})
-            if found:
-                pages[url] = {"true_from": date, "candidates": found}
+            # Every rendered page is a version, even one that states no value: an empty
+            # version still ends or replaces the older versions of its URL (§3, /values).
+            pages[url] = {"true_from": date, "candidates": found}
         self.store.finish_build(dossier, generation, calls.succeeded, pages, when,
                                 budget.spent)

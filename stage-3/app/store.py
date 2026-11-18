@@ -567,7 +567,29 @@ class Store:  # pylint: disable=too-many-instance-attributes
         for name in FIELDS:
             fields[name] = (candidates_module.executives_field(rows[name]) if name == "executives"
                             else candidates_module.field(rows[name]))
+        self._selected_learned(dossier, fields, when)
         return fields
+
+    @staticmethod
+    def _selected_learned(dossier: Dossier, fields: dict, when: str) -> None:
+        """A selected value's `learned_at` is the build that made it selected (§3).
+
+        A candidate's own `learned_at` stays the first build that gathered it; the
+        field's is the build that selected it. It therefore stays put while the
+        selection does, and moves to the build that selects the value again after
+        another value held the field.
+        """
+        for name in FIELDS:
+            new = fields[name]
+            if new["value"] is None:
+                new["learned_at"] = None
+                continue
+            previous = dossier.fields.get(name) or {}
+            if previous.get("value") is not None and candidates_module.same_value(
+                    new["value"], previous["value"]):
+                new["learned_at"] = previous.get("learned_at") or when
+            else:
+                new["learned_at"] = when
 
     def _record_changes(self, dossier: Dossier, fields: dict, when: str) -> None:
         """Append the history and feed entries one ready build makes (§3).
