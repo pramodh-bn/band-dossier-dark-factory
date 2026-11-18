@@ -1,11 +1,14 @@
 """One build: the calls it makes, what it spends, and the candidates it keeps (§2).
 
-A build gathers browser-visible page text -- a rendered extract through Nimble,
-which is the text a reader sees once the page has loaded. Reading every page the
-searches return comes first, so no gathered page can be left unread by a later
-call; only then, and only when it cannot crowd out one of those pages, does the
-build spend 25 units on a research run and read the pages it cites. Every value a
-page's text supports becomes a candidate; the selection rule picks one per field.
+A build searches ten times, runs one research pass, and reads pages as a browser
+shows them -- a rendered extract through Nimble, the text a reader sees once the
+page has loaded. Reading is what makes evidence, so the pages are chosen with the
+budget in mind: the pages research cites come first (their evidence exists
+nowhere else), then the company's own pages, then pages whose search snippet
+carries a field's statement vocabulary, so a page is read whenever it may state a
+value. A page's text, and only a page's text, supplies candidates: nothing is
+asserted about a page the build did not read, and a research snippet alone never
+stands in for browser text.
 
 It never makes a provider call for a read, never spends past §9's 80 units, and
 records nothing after a reset or import.
@@ -22,8 +25,7 @@ BUDGET_UNITS = 80
 WORKERS = 8
 #: Searches one build makes, in order: the first is exactly the domain and the rest name
 #: the company. Ten reach every page the sample and graded corpora serve for a company (a
-#: search returns at most ten), so the gathered set is the whole searchable footprint and
-#: every gathered page can be read as browser text.
+#: search returns at most ten), so nothing a search would return is out of reach.
 QUERIES = (
     "{domain}",
     "{name} about contact",
@@ -45,32 +47,31 @@ def queries(domain: str) -> list[str]:
 
 
 def research_fits(budget) -> bool:
-    """Whether a research run still fits after every gathered page has been read.
-
-    Reading every gathered page comes first: the run is started only when it cannot
-    crowd out a page a search already returned. A cited page costs three units and
-    the run twenty-five, so the run is taken whenever its own cost remains; if no
-    room is left for the page it cites, that claim still reaches the dossier as
-    evidence when its excerpt supports it.
-    """
+    """Whether the research run still fits after the searches."""
     return budget.limit - budget.spent >= providers.RESEARCH_COST
 
 
-def _claimed(field: str, claimed, excerpt: str, domain: str):
-    """The value a research claim asserts, when its own citation supports exactly that value."""
-    if not isinstance(excerpt, str) or not excerpt.strip():
-        return None
-    supported = evidence.supported_value(" ".join(excerpt.split()), field, domain)
-    if supported is None:
-        return None
-    if isinstance(supported, str):
-        if not isinstance(claimed, str) or claimed.strip() != supported:
-            return None
-    elif isinstance(claimed, bool) or not isinstance(claimed, (int, float)):
-        return None
-    elif int(claimed) != supported:
-        return None
-    return supported
+def page_priority(urls: list[str], snippets: dict[str, str], cited: list[str],
+                  domain: str) -> list[str]:
+    """The order gathered pages are read in, most valuable first.
+
+    The pages research cites come first: their values exist nowhere else, and a
+    claim may not stand in for a page the build did not read. Then the company's
+    own pages, where a served text is most likely to differ from what a browser
+    shows; then pages whose search snippet carries a field's statement vocabulary,
+    the cheap triage signal that a page may state a value; then the rest, by URL.
+    """
+    def rank(url: str) -> tuple:
+        if url in cited:
+            return (0, cited.index(url), url)
+        if pages.host_of(url) == domain:
+            return (1, 0, url)
+        snippet = snippets.get(url, "")
+        if any(evidence.has_statement(snippet, name) for name in evidence.FIELDS):
+            return (2, 0, url)
+        return (3, 0, url)
+
+    return sorted(dict.fromkeys(urls), key=rank)
 
 
 class Builder:
@@ -102,8 +103,8 @@ class Builder:
         calls = providers.Calls(budget)
         page_text: dict[str, str] = {}
         found: list[str] = []
+        snippets: dict[str, str] = {}
         seen: set[str] = set()
-        claims: list[tuple[str, object, str, str]] = []
 
         def gather(url: str) -> None:
             """Read one page as a browser shows it, when the budget still allows it."""
@@ -126,36 +127,27 @@ class Builder:
                     return
                 for result in future.result() or []:
                     url = result.get("url")
-                    if isinstance(url, str) and url and url not in seen:
+                    if not isinstance(url, str) or not url:
+                        continue
+                    snippets.setdefault(url, result.get("snippet") or "")
+                    if url not in seen:
                         seen.add(url)
                         found.append(url)
-            # 2. Every gathered page as browser text: the company's own pages first, then
-            #    the rest by URL, so a cap on spending costs the least. Waiting for these
-            #    makes the spend known before the optional research run.
-            order = sorted(found, key=lambda url: (pages.host_of(url) != domain, url))
-            for future in [pool.submit(gather, url) for url in order]:
-                future.result()
-            # 3. Research only when it cannot crowd out a page a search returned.
-            answer = None
+            # 2. The research run, for the pages no search returns.
+            cited: list[str] = []
             if self.store.still_current(dossier, generation) and research_fits(budget):
                 answer = calls.research(providers.research_query(domain))
-            cited: list[str] = []
-            if answer is not None:
-                structured, citations = answer
-                for citation in citations:
-                    if not citation.url or citation.url in cited:
-                        continue
-                    cited.append(citation.url)
-                    field = (citation.field or "").removeprefix("$.")
-                    if field not in evidence.FIELDS:
-                        continue
-                    value = _claimed(field, structured.get(field), citation.snippet, domain)
-                    if value is not None:
-                        claims.append((field, value, citation.url,
-                                       " ".join(citation.snippet.split())))
-            # 4. Read every newly cited page as browser text too.
-            for future in [pool.submit(gather, url) for url in cited]:
-                future.result()
+                if answer is not None:
+                    _, citations = answer
+                    cited = [citation.url for citation in citations
+                             if citation.url and citation.url not in cited]
+            # 3. Read the gathered pages in priority order, up to what the budget can afford.
+            #    The set is chosen here, before any thread runs, so the same build reads the
+            #    same pages every time; the cited pages are first, so a research value is
+            #    never lost to a page that only a snippet hinted at.
+            slots = (budget.limit - budget.spent) // providers.RENDER_COST
+            for url in page_priority(found + cited, snippets, cited, domain)[:max(slots, 0)]:
+                pool.submit(gather, url)
 
         rows = {name: [] for name in evidence.FIELDS}
         for url in sorted(page_text):
@@ -168,14 +160,5 @@ class Builder:
                                        "kind": meta["kind"],
                                        "published_at": meta["published_at"],
                                        "retrieved_at": when, "selected": False})
-        for name, value, url, excerpt in claims:
-            if url in page_text:
-                continue  # the page's own text already carries every value it supports
-            rows[name].append({"value": value, "url": url, "excerpt": excerpt,
-                               "provider": providers.PROVIDER,
-                               "kind": "own" if pages.host_of(url) == domain
-                               else "aggregator",
-                               "published_at": None, "retrieved_at": when,
-                               "selected": False})
         fields = {name: candidates.field(rows[name]) for name in evidence.FIELDS}
         self.store.finish_build(dossier, generation, calls.succeeded, fields, when)

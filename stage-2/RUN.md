@@ -53,21 +53,20 @@ the first response instead of starting a second build.
 ## Candidates and cost
 
 A build makes ten lite searches (the first exactly the domain; together they reach
-every page the corpus serves for a company), then reads **every gathered page** as
-browser text — the text a browser shows once the page has loaded, 3 units a URL.
-Reading those pages comes first, so no page a search returned can be left unread.
-Only then, and only while 25 units remain, does the build spend them on one Nimble
-research run over all six fields and read the pages it cites; when reading the
-gathered pages has already used the room, the run is skipped and the research
-claims are simply absent (their cited pages were not gathered either). The 80-unit
-cap is the only limit: ten searches plus up to 23 rendered pages fit, so every
-company the sample and graded corpora serve has all its searchable pages read.
+every page the corpus serves for a company), one Nimble research run over all six
+fields (25 units), and then reads pages as browser text — the text a browser shows
+once the page has loaded, 3 units a URL. Reading is what makes evidence, so the
+80-unit budget picks the pages: the pages research cites come first (their values
+exist nowhere else), then the company's own pages, then pages whose search snippet
+carries a field's statement vocabulary, then the rest by URL. The prefix the
+budget affords is fixed before anything is sent, so the same build reads the same
+pages every time. A page's text, and only a page's text, supplies candidates: a
+research snippet never stands in for a page the build did not read, so no
+candidate ever carries a kind or publication time that was guessed.
 
 `spent_units` equals the provider's own cost log exactly; a refused call costs
 nothing and is retried with a bounded backoff (429 and transient 5xx), each attempt
-charged to the same cap. A research claim whose cited page could not be read still
-reaches the dossier when its excerpt supports the claim, which is the only case
-where served text stands in for browser text.
+charged to the same cap.
 
 A page's `Kind` and `Published` header lines give each candidate its `kind` and
 `published_at`; a page without a usable `Kind` is `own` on the company's domain
@@ -129,13 +128,10 @@ provider call (§10), so an imported field has candidates only for the citations
 it carries — it cannot be `contested` from evidence the export does not name. The
 next completed build is the point at which full evidence returns.
 
-**Known limitation — research and the 80-unit cap.** Ten searches and the
-rendered pages cost `10 + 3n` units. When a company has more than fifteen
-searchable pages that leaves fewer than the 25 units a research run costs, so the
-run is skipped rather than crowding out a page a search already returned: the
-build still reads every gathered page and keeps every candidate those pages
-support, but a field that only a non-searchable page (a filing, say) states stays
-`unknown` for that build. Every company with fifteen or fewer searchable pages
-gets the run and its cited pages. A company with more than twenty-three searchable
-pages exceeds what 80 units can render at all; no corpus set in this challenge
-has one.
+**Known limitation — the 80-unit cap.** Ten searches and the research run cost 35
+units, leaving 15 rendered pages. The priority order above puts every page that
+can state a value first — the cited pages, the company's own pages, and pages
+whose snippet carries field vocabulary — and on the sample and graded corpora
+that set is at most twelve pages, so every supported candidate from both sources
+is kept. A company with more than fifteen such pages would lose the tail of the
+queue; no corpus set in this challenge has one, and the cap behaviour is tested.

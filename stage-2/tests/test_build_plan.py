@@ -1,9 +1,10 @@
-"""The build plan: every gathered page is read, and the 80-unit cap is respected.
+"""The build plan: both evidence sources fit in 80 units, and nothing is guessed.
 
-The fake web here is the transport; the plan, the retries and the cost accounting
-are the shipped code. A corpus wide enough to exceed the old plan's sixteen
-rendered pages proves that no gathered page is left unread, that a value only a
-late page states still becomes a candidate, and that the budget is the only cap.
+The fake web is the transport; the plan, the retries and the cost accounting are
+the shipped code. A corpus wide enough to exceed the render budget proves that a
+value stated only by a late search result is still a candidate, that a value only
+a research citation states is too, and that a page the build never read supplies
+no candidate at all.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import uuid
 import pytest
 
 import fakeweb
-from app import builds, evidence, providers
+from app import builds, evidence, pages, providers
 from conftest import wait_ready
 
 ACME = "acme-robotics.test"
@@ -32,16 +33,17 @@ def build(client, domain: str) -> dict:
     return wait_ready(client, domain, seconds=20)
 
 
-def searchable(domain: str) -> dict[str, str]:
-    """Every searchable page of the fake company, as {url: browser text}."""
-    return {url: page.text(render=True) for url, page in fakeweb.PAGES[domain].items()
-            if page.searchable}
+def browser_texts(domain: str) -> dict[str, str]:
+    """Every page of the fake company, as {url: browser text}."""
+    return {url: page.text(render=True) for url, page in fakeweb.PAGES[domain].items()}
 
 
-def supported(domain: str, pages: dict[str, str]) -> dict[str, set]:
+def expected_candidates(domain: str, urls=None) -> dict[str, set]:
     """{field: {(url, value)}} that those pages' browser text supports."""
     tokens: dict[str, set] = {}
-    for url, text in pages.items():
+    for url, text in browser_texts(domain).items():
+        if urls is not None and url not in urls:
+            continue
         for name, pairs in evidence.page_values(text, domain).items():
             for value, _ in pairs:
                 tokens.setdefault(name, set()).add((url, repr(value)))
@@ -57,34 +59,37 @@ def candidates_of(body: dict) -> dict[str, set]:
     return found
 
 
-def assert_no_missing(body: dict, domain: str, pages: dict[str, str]) -> None:
-    """Every value a read page supports is a candidate of its field."""
-    missing = {name: sorted(values - candidates_of(body).get(name, set()))
-               for name, values in supported(domain, pages).items()}
+def assert_no_missing(body: dict, expected: dict[str, set]) -> None:
+    """Every value the expected pages support is a candidate of its field."""
+    got = candidates_of(body)
+    missing = {name: sorted(values - got.get(name, set()))
+               for name, values in expected.items()}
     assert not {name: values for name, values in missing.items() if values}, missing
 
 
-def rendered_pages(domain: str) -> list[str]:
-    """The URLs this company's build actually read, in the order it read them."""
-    return [url for url, page in fakeweb.PAGES[domain].items() if page.searchable]
+def research_urls(domain: str) -> list[str]:
+    """The pages a research run for `domain` cites."""
+    return [url for _, _, url, _ in fakeweb.RESEARCH.get(domain, [])]
 
 
-def test_a_corpus_past_the_old_page_cap_loses_no_candidate(world):
-    """A 22-page company is read whole, and a value only the last page states is a candidate."""
-    pages = searchable(WIDE)
-    assert len(pages) >= 20
+def read_urls() -> set[str]:
+    """The pages the last build read as browser text."""
+    return {entry["key"] for entry in fakeweb.LOG
+            if entry["method"] == "extract" and entry["status"] == 200}
+
+
+def test_a_large_company_keeps_both_search_and_research_candidates(world):
+    """A late search result's value and a research-only value are both candidates."""
+    expected = expected_candidates(WIDE)
     body = build(world, WIDE)
     assert body["state"] == "ready"
-    assert_no_missing(body, WIDE, pages)
-    ceo = body["fields"]["ceo"]
-    assert [(candidate["value"], candidate["url"]) for candidate in ceo["candidates"]] == \
-        [("Browser Person", "https://wide-works.test/stale"),
-         ("Late Page Person", "https://zz-late.test/wide-profile")]
-    assert ceo["value"] == "Browser Person" and ceo["status"] == "contested"
+    assert_no_missing(body, expected)
+    ceo_values = {candidate["value"] for candidate in body["fields"]["ceo"]["candidates"]}
+    assert ceo_values == {"Browser Person", "Late Page Person"}
+    legal = body["fields"]["legal_name"]
+    assert [candidate["url"] for candidate in legal["candidates"]] == research_urls(WIDE)
+    assert legal["value"] == "Wide Works Ltd" and legal["candidates"][0]["kind"] == "filing"
     assert body["spent_units"] == fakeweb.spent() <= 80
-    rendered = {entry["key"] for entry in fakeweb.LOG
-                if entry["method"] == "extract" and entry["status"] == 200}
-    assert set(pages) <= rendered          # every gathered page was read as browser text
 
 
 def test_a_stale_served_text_never_becomes_a_candidate(world):
@@ -98,52 +103,61 @@ def test_a_stale_served_text_never_becomes_a_candidate(world):
                for candidate in body["fields"]["ceo"]["candidates"])
 
 
-def test_a_page_repeated_by_every_search_is_read_once(world):
-    """Ten searches that all return the same pages still read each page once."""
-    body = build(world, WIDE)
-    reads = [entry["key"] for entry in fakeweb.LOG
-             if entry["method"] == "extract" and entry["status"] == 200]
-    assert len(reads) == len(set(reads)) == len(searchable(WIDE))
-    assert body["spent_units"] == 10 + 3 * len(searchable(WIDE))
+def test_the_cited_page_is_read_before_optional_pages(world):
+    """The research citation is read first, so its value survives a cap on reading."""
+    body = build(world, HUGE)
+    reads = read_urls()
+    assert research_urls(HUGE)[0] in reads
+    assert body["fields"]["legal_name"]["value"] == "Huge Group Holdings Ltd"
+    assert body["spent_units"] == fakeweb.spent() <= 80
 
 
 def test_the_budget_is_the_only_cap(world):
-    """With more pages than 80 units can read, the build stops at the cap and says so."""
-    pages = searchable(HUGE)
-    assert len(pages) > 23
+    """With more value-bearing pages than 80 units can read, the queue stops at the cap."""
     body = build(world, HUGE)
     assert body["state"] == "ready"
-    assert body["spent_units"] == fakeweb.spent() <= 80
     renders = [entry for entry in fakeweb.LOG
                if entry["method"] == "extract" and entry["status"] == 200]
-    assert len(renders) == (80 - len(builds.queries(HUGE))) // providers.RENDER_COST
-    assert body["spent_units"] == len(builds.queries(HUGE)) + len(renders) * 3
-    assert body["fields"]["ceo"]["value"] is None       # the capped page was never read
-    assert "Capped Person" not in {
-        candidate["value"] for candidate in body["fields"]["ceo"]["candidates"]}
+    assert len(renders) == (80 - len(builds.queries(HUGE)) - providers.RESEARCH_COST) // \
+        providers.RENDER_COST
+    assert body["spent_units"] == len(builds.queries(HUGE)) + \
+        providers.RESEARCH_COST + len(renders) * providers.RENDER_COST <= 80
+    ceo = body["fields"]["ceo"]
+    assert 1 <= len(ceo["candidates"]) < 20          # the tail of the queue was not read
+    read = read_urls()
+    assert all(candidate["url"] in read for field in body["fields"].values()
+               for candidate in field["candidates"])
 
 
-def test_reading_the_gathered_pages_comes_before_research(world):
-    """Research runs only when it cannot crowd out a gathered page; else it is skipped."""
-    wide = build(world, WIDE)
-    research = [entry for entry in fakeweb.LOG if entry["method"] == "research"]
-    assert research == []                                # 10 + 66 leaves no room for 25 + 3
-    before = fakeweb.spent()
-    small = build(world, ACME)
-    research = [entry for entry in fakeweb.LOG if entry["method"] == "research"]
-    assert len(research) == 1 and research[0]["status"] == 200
-    assert small["spent_units"] == fakeweb.spent() - before <= 80
-    assert wide["spent_units"] <= 80
+def test_no_candidate_comes_from_a_page_the_build_did_not_read(world):
+    """With every extract refused, the build keeps no candidate and invents no metadata."""
+    fakeweb.FAULTS.add("extract")
+    body = build(world, WIDE)
+    assert body["state"] == "ready"                  # the searches and research answered
+    assert body["spent_units"] == fakeweb.spent() == 10 + 25
+    for name, field in body["fields"].items():
+        assert field == {"value": None, "status": "unknown", "citations": [],
+                         "candidates": []}, name
 
 
-def test_a_cited_page_is_read_when_research_runs(world):
-    """The research run's cited pages are read as browser text too."""
-    body = build(world, ACME)
-    cited = {url for claim in fakeweb.RESEARCH[ACME] for url in (claim[2],)}
-    reads = {entry["key"] for entry in fakeweb.LOG
-             if entry["method"] == "extract" and entry["status"] == 200}
-    assert cited <= reads
-    assert body["spent_units"] == fakeweb.spent()
+def test_every_candidate_matches_the_page_it_cites(world):
+    """No candidate carries a kind or time the page's own header does not state."""
+    body = build(world, WIDE)
+    for name, field in body["fields"].items():
+        for candidate in field["candidates"]:
+            page = fakeweb.PAGES[WIDE][candidate["url"]]
+            header = pages.metadata(page.text(render=True), candidate["url"], WIDE)
+            assert (candidate["kind"], candidate["published_at"]) == \
+                (header["kind"], header["published_at"]), (name, candidate)
+
+
+def test_a_page_repeated_by_every_search_is_read_once(world):
+    """Ten searches over the same pages read each selected page once."""
+    body = build(world, WIDE)
+    reads = [entry["key"] for entry in fakeweb.LOG
+             if entry["method"] == "extract" and entry["status"] == 200]
+    assert len(reads) == len(set(reads))
+    assert body["spent_units"] == 10 + 25 + 3 * len(reads)
 
 
 def test_the_plan_keeps_exactly_one_successful_domain_search(world):
@@ -158,12 +172,12 @@ def test_the_plan_keeps_exactly_one_successful_domain_search(world):
 
 @pytest.mark.parametrize("refusals", [1, 2])
 def test_a_throttled_provider_still_builds_every_candidate(world, refusals):
-    """Refused attempts cost nothing and the retries still read every gathered page."""
+    """Refused attempts cost nothing and the retries still read the priority pages."""
     fakeweb.LIMIT = refusals
-    pages = searchable(WIDE)
+    expected = expected_candidates(WIDE)
     body = build(world, WIDE)
     assert body["state"] == "ready"
-    assert_no_missing(body, WIDE, pages)
+    assert_no_missing(body, expected)
     refused = [entry for entry in fakeweb.LOG if entry["status"] == 429]
     assert refused and all(entry["cost"] == 0 for entry in refused)
     assert body["spent_units"] == fakeweb.spent() <= 80
@@ -187,3 +201,13 @@ def test_a_timeout_keeps_its_units_and_the_cap_holds(world):
     assert fakeweb.spent() == body["spent_units"] <= 80
     timeouts = [entry for entry in fakeweb.LOG if entry["method"] == "extract"]
     assert len(timeouts) > 1 and all(entry["cost"] == 3 for entry in timeouts)
+
+
+def test_a_small_company_reads_every_page_and_runs_research(world):
+    """A company that fits the budget reads all its pages and its cited page."""
+    body = build(world, ACME)
+    assert body["state"] == "ready"
+    assert body["spent_units"] == fakeweb.spent() <= 80
+    assert research_urls(ACME)[0] in read_urls()
+    expected = expected_candidates(ACME)
+    assert_no_missing(body, expected)

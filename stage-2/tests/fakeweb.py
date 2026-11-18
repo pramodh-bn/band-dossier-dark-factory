@@ -81,6 +81,11 @@ PAGES = {
 }
 
 
+def snippet(page: Page) -> str:
+    """The lite search snippet: the first characters of the page's served prose."""
+    return page.text(render=False).partition("\n\n")[2][:300]
+
+
 def _noise(domain: str, host: str, count: int, kind: str = "own") -> dict:
     """`count` pages that support no field, for a corpus wide enough to test the budget."""
     name = domain.split(".")[0].replace("-", " ")
@@ -89,9 +94,9 @@ def _noise(domain: str, host: str, count: int, kind: str = "own") -> dict:
         for index in range(1, count + 1)}
 
 
-#: A company with more pages than the budget can read at the old plan's pace: the value it
-#: needs is on the page that sorts last, and one page's served text disagrees with the
-#: browser's.
+#: A company with more pages than the budget can read: a value only a late search
+#: result states, a value only a research citation states, and a page whose served
+#: text disagrees with the browser's.
 PAGES["wide-works.test"] = {
     **_noise("wide-works.test", "wide-works.test", 10, "own"),
     **_noise("wide-works.test", "wire.test", 10, "news"),
@@ -101,15 +106,25 @@ PAGES["wide-works.test"] = {
     "https://zz-late.test/wide-profile": Page(
         kind="news", published="2026-01-01T00:00:00+00:00",
         served=("Wide Works is led by chief executive Late Page Person.")),
+    "https://filings.test/wide-works": Page(
+        kind="filing", published="2025-06-01T00:00:00+00:00", searchable=False,
+        served="Wide Works trades under the registered name Wide Works Ltd."),
 }
 
-#: A company with more searchable pages than the 80-unit cap can render: the last pages by
-#: priority cannot be read, and the build must say so by simply not spending more.
+#: A company with more value-bearing pages than 80 units can render: the cited page must
+#: still be read first, and the pages at the end of the queue cannot be.
+_PEOPLE = ("Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+           "India", "Juliett")
 PAGES["huge-group.test"] = {
-    **_noise("huge-group.test", "huge-group.test", 2, "own"),
-    **_noise("huge-group.test", "wire.test", 23, "news"),
-    "https://zz-last.test/huge-profile": Page(
-        kind="news", served="Huge Group is led by chief executive Capped Person."),
+    **{f"https://huge-group.test/p{index:02d}": Page(
+        kind="own", served=f"Huge Group is led by chief executive Owner {_PEOPLE[index - 1]}.")
+       for index in range(1, 11)},
+    **{f"https://wire.test/h{index:02d}": Page(
+        kind="news", served=f"Huge Group is led by chief executive Wire {_PEOPLE[index - 1]}.")
+       for index in range(1, 11)},
+    "https://filings.test/huge-group": Page(
+        kind="filing", published="2025-06-01T00:00:00+00:00", searchable=False,
+        served="Huge Group trades under the registered name Huge Group Holdings Ltd."),
 }
 
 #: domain -> research answer: (field, value, url, excerpt)
@@ -118,6 +133,14 @@ RESEARCH = {
             "Acme Robotics was incorporated in 2014."),
            ("headcount_range", "51-200", "https://acme-robotics.test/careers",
             "Acme Robotics employs about 120 people across three offices.")],
+    "wide-works.test": [
+        ("legal_name", "Wide Works Ltd", "https://filings.test/wide-works",
+         "Wide Works trades under the registered name Wide Works Ltd."),
+    ],
+    "huge-group.test": [
+        ("legal_name", "Huge Group Holdings Ltd", "https://filings.test/huge-group",
+         "Huge Group trades under the registered name Huge Group Holdings Ltd."),
+    ],
 }
 
 #: Methods that always refuse with a 500: a persistent provider error.
@@ -269,8 +292,9 @@ class FakeCalls(providers.Calls):
         domain = _named(query)
         if domain is None:
             return FakeSearch(results=[])
-        return FakeSearch(results=[FakeResult(url=url) for url, page in PAGES[domain].items()
-                                   if page.searchable])
+        return FakeSearch(results=[
+            FakeResult(url=url, description=snippet(page))
+            for url, page in PAGES[domain].items() if page.searchable])
 
     def _invoke_extract(self, url: str, render: bool = False):
         cost = providers.RENDER_COST if render else providers.EXTRACT_COST

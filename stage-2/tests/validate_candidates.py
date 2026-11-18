@@ -34,22 +34,24 @@ def load(corpus: pathlib.Path, challenge: pathlib.Path):
 
 
 def gathered(loaded, key, rank, domain: str, epoch: int) -> list[str]:
-    """The URLs a build would read: every search result, then every cited page when the
-    research run that names them still fits after reading the gathered pages."""
+    """The URLs a build reads: the priority prefix that the 80-unit budget affords."""
     from app import providers  # noqa: PLC0415 - the cost table
+    from app.builds import page_priority  # noqa: PLC0415 - the shipped order
 
     found: list[str] = []
+    snippets: dict[str, str] = {}
     for query in queries(domain):
         for page in rank(loaded.pages(epoch), query, 10, provider="nimble",
                          traits=loaded.traits):
             if page.url not in found:
                 found.append(page.url)
-    spent = len(queries(domain)) + providers.RENDER_COST * len(found)
-    if 80 - spent >= providers.RESEARCH_COST:
-        for claim in loaded.companies[domain].research.get("nimble", {}).get(str(epoch), []):
-            if claim["url"] not in found:
-                found.append(claim["url"])
-    return found
+            snippets.setdefault(page.url, page.snippet)
+    spent = len(queries(domain)) + providers.RESEARCH_COST
+    cited = [claim["url"] for claim in
+             loaded.companies[domain].research.get("nimble", {}).get(str(epoch), [])
+             if claim["url"] not in found]
+    slots = max((80 - spent) // providers.RENDER_COST, 0)
+    return page_priority(found + cited, snippets, cited, domain)[:slots]
 
 
 def expected(entry: dict, stage: str, field: str, epoch: int = 0):
