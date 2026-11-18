@@ -24,11 +24,7 @@ from .domain import company_name
 
 BUDGET_UNITS = 80
 WORKERS = 8
-#: Units kept back from the page queue for the canonical originals lineage needs.
-#: A build reads its value-bearing pages first and leaves this much for the one-unit
-#: extracts that resolve a copy's original; a chain needing more still falls back to
-#: the URL's host under the 80-unit cap.
-LINEAGE_RESERVE = 6
+
 #: Searches one build makes, in order: the first is exactly the domain and the rest name
 #: the company. Ten reach every page the sample and graded corpora serve for a company (a
 #: search returns at most ten), so nothing a search would return is out of reach.
@@ -85,24 +81,16 @@ def page_priority(urls: list[str], snippets: dict[str, str], cited: list[str],
                   key=lambda url: page_rank(url, snippets, cited, domain))
 
 
-def planned_reads(ordered: list[str], snippets: dict[str, str], cited: list[str],
-                  domain: str, remaining: int) -> list[str]:
-    """The prefix of `ordered` a build reads, keeping lineage units back.
+def evidence_prefix(ordered: list[str], snippets: dict[str, str], cited: list[str],
+                    domain: str, remaining: int) -> list[str]:
+    """The cited, own and triaged pages the budget can read first.
 
-    Every cited, own or triaged page is read first. Only pages beyond that prefix
-    give up slots for the one-unit lineage extracts; when the budget cannot even
-    cover the value-bearing prefix, the prefix takes every slot it can.
+    This first phase contains every page that may state a value; the caller reads
+    them, resolves their lineage, and only then spends what is left on filler pages.
     """
     hard = max(remaining // providers.RENDER_COST, 0)
-    must = sum(1 for url in ordered
-               if page_rank(url, snippets, cited, domain)[0] <= 2)
-    spare = max(hard - must, 0)
-    reserve_pages = min(spare, (LINEAGE_RESERVE + providers.RENDER_COST - 1)
-                        // providers.RENDER_COST)
-    slots = max(hard - reserve_pages, 0)
-    if slots < must:
-        slots = min(must, hard)
-    return ordered[:slots]
+    return [url for url in ordered
+            if page_rank(url, snippets, cited, domain)[0] <= 2][:hard]
 
 
 class Builder:
@@ -173,72 +161,97 @@ class Builder:
                     _, citations = answer
                     cited = [citation.url for citation in citations
                              if citation.url and citation.url not in cited]
-            # 3. Read the gathered pages in priority order, up to what the budget can afford.
-            #    The set is chosen here, before any thread runs, so the same build reads the
-            #    same pages every time; the cited pages are first, so a research value is
-            #    never lost to a page that only a snippet hinted at.
+            # 3a. Read every cited/own/value-triaged page first. These are the pages
+            #     that can state a value; the remaining units are spent on their
+            #     lineage before any rank-3 filler page is read.
             ordered = page_priority(found + cited, snippets, cited, domain)
-            for url in planned_reads(ordered, snippets, cited, domain,
-                                     budget.limit - budget.spent):
+            first = evidence_prefix(ordered, snippets, cited, domain,
+                                    budget.limit - budget.spent)
+            for url in first:
                 pool.submit(gather, url)
 
-        # 4. Every page's values, then the origin of every page that states one
-        #    (§4, Origins). A Canonical link to a page this build did not read is
-        #    fetched through the same provider, within the units the page queue left
-        #    back; a page no provider serves falls back to its host. Fetched originals
-        #    answer lineage only: evidence is still what searches and research cite.
         page_data: dict[str, dict] = {}
-        for url in sorted(page_text):
+
+        def page_data_for(url: str) -> dict:
+            """One read page's kind, date and every candidate its browser text states."""
             text = page_text[url]
             meta = pages_module.metadata(text, url, domain)
             date = pages_module.true_from(text)
-            found: list[dict] = []
+            candidates: list[dict] = []
             for name, pairs in evidence.page_values(text, domain).items():
                 for value, excerpt in pairs:
-                    found.append({"field": name, "value": value, "url": url,
-                                  "excerpt": excerpt, "provider": providers.PROVIDER,
-                                  "kind": meta["kind"],
-                                  "published_at": meta["published_at"],
-                                  "retrieved_at": when, "true_from": date,
-                                  "learned_at": None, "selected": False})
+                    candidates.append({"field": name, "value": value, "url": url,
+                                       "excerpt": excerpt,
+                                       "provider": providers.PROVIDER,
+                                       "kind": meta["kind"],
+                                       "published_at": meta["published_at"],
+                                       "retrieved_at": when, "true_from": date,
+                                       "learned_at": None, "selected": False})
             for title, pairs in evidence.page_executives(text, domain).items():
                 for value, excerpt in pairs:
-                    found.append({"field": "executives", "title": title, "value": value,
-                                  "url": url, "excerpt": excerpt,
-                                  "provider": providers.PROVIDER,
-                                  "kind": meta["kind"],
-                                  "published_at": meta["published_at"],
-                                  "retrieved_at": when, "true_from": date,
-                                  "learned_at": None, "selected": False})
+                    candidates.append({"field": "executives", "title": title,
+                                       "value": value, "url": url,
+                                       "excerpt": excerpt,
+                                       "provider": providers.PROVIDER,
+                                       "kind": meta["kind"],
+                                       "published_at": meta["published_at"],
+                                       "retrieved_at": when, "true_from": date,
+                                       "learned_at": None, "selected": False})
             for value, excerpt in evidence.page_investors(text, domain):
-                found.append({"field": "investors", "value": value, "url": url,
-                              "excerpt": excerpt, "provider": providers.PROVIDER,
-                              "kind": meta["kind"],
-                              "published_at": meta["published_at"],
-                              "retrieved_at": when, "true_from": date,
-                              "learned_at": None, "selected": False})
-            page_data[url] = {"true_from": date, "candidates": found}
+                candidates.append({"field": "investors", "value": value, "url": url,
+                                   "excerpt": excerpt,
+                                   "provider": providers.PROVIDER,
+                                   "kind": meta["kind"],
+                                   "published_at": meta["published_at"],
+                                   "retrieved_at": when, "true_from": date,
+                                   "learned_at": None, "selected": False})
+            return {"true_from": date, "candidates": candidates}
 
-        lineage_texts = dict(page_text)
+        def harvest(urls: list[str]) -> None:
+            """Turn newly read pages into candidates and add their text to lineage."""
+            for url in urls:
+                if url in page_text and url not in page_data:
+                    page_data[url] = page_data_for(url)
+                    lineage_texts[url] = page_text[url]
 
         def fetch_lineage(url: str) -> str | None:
             if not self.store.still_current(dossier, generation):
                 return None
             return calls.extract(url)
 
+        lineage_texts: dict[str, str] = {}
         lineage = pages_module.Lineage(lineage_texts, fetch_lineage, domain)
-        origins = {url: lineage.origin(url) for url in sorted(page_data)
-                   if page_data[url]["candidates"]}
 
-        pages: dict[str, dict] = {}
-        for url, data in page_data.items():
-            origin = origins.get(url)
-            if origin is not None:
+        def resolve(urls: list[str]) -> None:
+            """Resolve the origin of each read page that states a value."""
+            for url in sorted(urls):
+                data = page_data.get(url)
+                if not data or not data["candidates"]:
+                    continue
+                origin = lineage.origin(url)
                 for candidate in data["candidates"]:
                     candidate["origin"] = origin
-            # Every rendered page is a version, even one that states no value: an empty
-            # version still ends or replaces the older versions of its URL (§3, /values).
-            pages[url] = data
+
+        harvest(first)
+        resolve(first)
+
+        # 3b. With every evidence-bearing page and its canonical originals accounted
+        #     for, spend whatever units remain on rank-3 pages. They are read in URL
+        #     order, so the same budget always selects the same filler pages.
+        rest = [url for url in ordered
+                if page_rank(url, snippets, cited, domain)[0] > 2]
+        slots = max((budget.limit - budget.spent) // providers.RENDER_COST, 0)
+        fillers = rest[:slots]
+        if fillers:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+                for url in fillers:
+                    pool.submit(gather, url)
+            harvest(fillers)
+            resolve(fillers)
+
+        # Every read page is a version, even one that states no value: an empty version
+        # still ends or replaces the older versions of its URL (§3, /values).
+        pages: dict[str, dict] = dict(page_data)
         # A batch build that the shared budget kept from even starting completes with
         # what it has; a build whose calls were all attempted and all failed is `failed`
         # (§4, Batches; §4, Provider failure).

@@ -91,10 +91,10 @@ name in exactly one value qualifies; otherwise it is a `change`.
 Ten lite searches (the first exactly the domain), one research run (25 units), then
 rendered extracts (3 units a URL) in priority order - research-cited pages, the
 company's own pages, pages whose search snippet carries scalar, executive-title or
-investor vocabulary, then the rest - up to what the remaining 80-unit budget
-affords. A small reserve is kept back from the page queue for the one-unit lineage
-extracts that resolve a copy's canonical original. The prefix is fixed before
-anything is sent, so a build reads the same pages every time. `spent_units` equals
+investor vocabulary - up to what the budget affords. It resolves those pages'
+canonical originals through the same provider, then spends whatever units remain
+on filler pages. The order is fixed before anything is sent, so a build reads the
+same pages every time. `spent_units` equals
 the provider's own cost log; refused calls cost nothing and are retried with a
 bounded backoff.
 
