@@ -6,9 +6,7 @@ provider, then value -- so the same candidates always select the same value.
 """
 from __future__ import annotations
 
-from datetime import datetime
-
-from .pages import AUTHORITY, KINDS
+from .pages import AUTHORITY, KINDS, instant
 
 PROVIDERS = ("nimble", "tavily", "kernel", "browserbase")
 PROVIDER_ORDER = {name: index for index, name in enumerate(PROVIDERS)}
@@ -112,13 +110,7 @@ def legacy_kind(stated):
 
 def legacy_published(stated):
     """A publication time a legacy export records, as an RFC 3339 instant, or None."""
-    if not isinstance(stated, str):
-        return None
-    try:
-        moment = datetime.fromisoformat(stated.upper().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return moment.isoformat()
+    return instant(stated)
 
 
 def candidates_from_citations(value, citations: list[dict], retrieved_at, kind=None,

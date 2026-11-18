@@ -43,16 +43,25 @@ def kind_of(text: str, url: str, domain: str) -> str:
     return "own" if host_of(url) == domain else "aggregator"
 
 
-def published_of(text: str) -> str | None:
-    """The page's publication time as an RFC 3339 timestamp with an offset, or None."""
-    stated = headers(text).get("published", "").strip()
-    if not TIMESTAMP.fullmatch(stated):
+def instant(stated) -> str | None:
+    """An RFC 3339 timestamp with an explicit offset, normalised, or None.
+
+    A bare date, a time without an offset, an impossible date or prose is not a
+    timestamp: a candidate's `published_at` must always be an RFC 3339 instant
+    with an offset.
+    """
+    if not isinstance(stated, str) or not TIMESTAMP.fullmatch(stated.strip()):
         return None
     try:
-        moment = datetime.fromisoformat(stated.upper().replace("Z", "+00:00"))
+        moment = datetime.fromisoformat(stated.strip().upper().replace("Z", "+00:00"))
     except ValueError:
         return None
     return moment.isoformat()
+
+
+def published_of(text: str) -> str | None:
+    """The page's publication time as an RFC 3339 timestamp with an offset, or None."""
+    return instant(headers(text).get("published", ""))
 
 
 def metadata(text: str, url: str, domain: str) -> dict:

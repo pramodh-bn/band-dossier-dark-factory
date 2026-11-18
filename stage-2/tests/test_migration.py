@@ -184,6 +184,71 @@ def test_a_legacy_kind_and_publication_time_are_kept_when_present(client, world)
     assert field["status"] == "known"
 
 
+@pytest.mark.parametrize("stated,normalised", [
+    ("2026-02-20T00:00:00Z", "2026-02-20T00:00:00+00:00"),
+    ("2026-02-20T11:30:00+02:00", "2026-02-20T11:30:00+02:00"),
+    ("2026-02-20T00:00:00.250Z", "2026-02-20T00:00:00.250000+00:00"),
+])
+def test_a_valid_legacy_publication_time_is_kept_and_normalised(client, world, stated,
+                                                               normalised):
+    """An RFC 3339 `published_at` in a legacy citation reaches its candidate, with its offset."""
+    citation = {"url": "https://acme-robotics.test/team",
+                "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+                "provider": "nimble", "kind": "own", "published_at": stated}
+    snapshot = legacy_export(client, {
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": [citation]}})
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    [candidate] = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]["candidates"]
+    assert candidate["published_at"] == normalised
+    assert candidate["kind"] == "own"
+
+
+@pytest.mark.parametrize("stated", ["2026-02-20", "2026-02-20T00:00:00", "2026-02-30T00:00:00Z",
+                                    "yesterday", "", 5])
+def test_an_unusable_legacy_publication_time_becomes_null(client, world, stated):
+    """A date without an offset, an impossible date or prose is no publication time."""
+    citation = {"url": "https://acme-robotics.test/team",
+                "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+                "provider": "nimble", "published_at": stated}
+    snapshot = legacy_export(client, {
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": [citation]}})
+    response = client.post("/_test/import", json=snapshot)
+    assert response.status_code == 204
+    [candidate] = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]["candidates"]
+    assert candidate["published_at"] is None and candidate["value"] == "Dana Ruiz"
+
+
+@pytest.mark.parametrize("stated,kept", [("own", "own"), ("filing", "filing"),
+                                         ("news", "news"), ("aggregator", "aggregator"),
+                                         ("blog", None), ("OWN", None), ("", None), (7, None)])
+def test_an_unusable_legacy_kind_becomes_null(client, world, stated, kept):
+    """Only the four kinds survive; anything else has the authority of an aggregator."""
+    citation = {"url": "https://acme-robotics.test/team",
+                "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+                "provider": "nimble", "kind": stated}
+    snapshot = legacy_export(client, {
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": [citation]}})
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    [candidate] = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]["candidates"]
+    assert candidate["kind"] == kept
+
+
+def test_a_legacy_field_level_kind_and_time_reach_every_citation(client, world):
+    """A legacy field may record the page facts itself; every one of its candidates keeps them."""
+    first = {"url": "https://acme-robotics.test/team",
+             "excerpt": "Dana Ruiz has led Acme Robotics as chief executive since 2021.",
+             "provider": "nimble"}
+    second = {"url": "https://news.test/acme-appoints",
+              "excerpt": "Acme Robotics CEO: Priya Nair.", "provider": "nimble"}
+    snapshot = legacy_export(client, {
+        "ceo": {"value": "Dana Ruiz", "status": "known", "citations": [first, second],
+                "kind": "own", "published_at": "2026-01-05T00:00:00Z"}})
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    candidates = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]["candidates"]
+    assert [(c["kind"], c["published_at"]) for c in candidates] == \
+        [("own", "2026-01-05T00:00:00+00:00")] * 2
+
+
 def test_a_duplicated_page_and_value_is_one_candidate(client, world):
     """Two citations of the same page for the same value are one candidate."""
     same = {"url": "https://acme-robotics.test/about",
