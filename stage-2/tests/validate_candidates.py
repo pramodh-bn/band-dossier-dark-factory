@@ -34,16 +34,21 @@ def load(corpus: pathlib.Path, challenge: pathlib.Path):
 
 
 def gathered(loaded, key, rank, domain: str, epoch: int) -> list[str]:
-    """The URLs a build would read: every search result, then every cited page."""
+    """The URLs a build would read: every search result, then every cited page when the
+    research run that names them still fits after reading the gathered pages."""
+    from app import providers  # noqa: PLC0415 - the cost table
+
     found: list[str] = []
     for query in queries(domain):
         for page in rank(loaded.pages(epoch), query, 10, provider="nimble",
                          traits=loaded.traits):
             if page.url not in found:
                 found.append(page.url)
-    for claim in loaded.companies[domain].research.get("nimble", {}).get(str(epoch), []):
-        if claim["url"] not in found:
-            found.append(claim["url"])
+    spent = len(queries(domain)) + providers.RENDER_COST * len(found)
+    if 80 - spent >= providers.RESEARCH_COST:
+        for claim in loaded.companies[domain].research.get("nimble", {}).get(str(epoch), []):
+            if claim["url"] not in found:
+                found.append(claim["url"])
     return found
 
 

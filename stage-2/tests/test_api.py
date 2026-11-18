@@ -549,7 +549,7 @@ def test_refresh_while_building_starts_no_second_build(world):
     assert first.json() == again.json()
     body = wait_ready(world, ACME)
     assert body["state"] == "ready"
-    assert sum(1 for entry in fakeweb.LOG if entry["method"] == "search") == 7
+    assert sum(1 for entry in fakeweb.LOG if entry["method"] == "search") == 10
 
 
 def test_refresh_of_an_unknown_domain_is_404(world):

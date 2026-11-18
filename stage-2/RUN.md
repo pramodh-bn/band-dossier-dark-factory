@@ -52,13 +52,22 @@ the first response instead of starting a second build.
 
 ## Candidates and cost
 
-A build makes seven lite searches (the first exactly the domain), one Nimble
-research run over all six fields, then rendered extracts of the pages it found —
-the text a browser shows once the page has loaded, 3 units a URL. With 7 + 25
-spent on discovery, the 80-unit cap leaves 16 rendered pages, which covers every
-page the sample and graded corpora serve for a company. `spent_units` equals the
-provider's own cost log exactly; a refused call costs nothing and is retried with
-a bounded backoff (429 and transient 5xx), each attempt charged to the same cap.
+A build makes ten lite searches (the first exactly the domain; together they reach
+every page the corpus serves for a company), then reads **every gathered page** as
+browser text — the text a browser shows once the page has loaded, 3 units a URL.
+Reading those pages comes first, so no page a search returned can be left unread.
+Only then, and only while 25 units remain, does the build spend them on one Nimble
+research run over all six fields and read the pages it cites; when reading the
+gathered pages has already used the room, the run is skipped and the research
+claims are simply absent (their cited pages were not gathered either). The 80-unit
+cap is the only limit: ten searches plus up to 23 rendered pages fit, so every
+company the sample and graded corpora serve has all its searchable pages read.
+
+`spent_units` equals the provider's own cost log exactly; a refused call costs
+nothing and is retried with a bounded backoff (429 and transient 5xx), each attempt
+charged to the same cap. A research claim whose cited page could not be read still
+reaches the dossier when its excerpt supports the claim, which is the only case
+where served text stands in for browser text.
 
 A page's `Kind` and `Published` header lines give each candidate its `kind` and
 `published_at`; a page without a usable `Kind` is `own` on the company's domain

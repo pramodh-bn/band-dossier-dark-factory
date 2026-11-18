@@ -80,6 +80,38 @@ PAGES = {
     },
 }
 
+
+def _noise(domain: str, host: str, count: int, kind: str = "own") -> dict:
+    """`count` pages that support no field, for a corpus wide enough to test the budget."""
+    name = domain.split(".")[0].replace("-", " ")
+    return {f"https://{host}/page-{index:02d}": Page(
+        kind=kind, served=f"{name} publishes note {index} about its day-to-day work.")
+        for index in range(1, count + 1)}
+
+
+#: A company with more pages than the budget can read at the old plan's pace: the value it
+#: needs is on the page that sorts last, and one page's served text disagrees with the
+#: browser's.
+PAGES["wide-works.test"] = {
+    **_noise("wide-works.test", "wide-works.test", 10, "own"),
+    **_noise("wide-works.test", "wire.test", 10, "news"),
+    "https://wide-works.test/stale": Page(
+        kind="own", served="Wide Works is led by chief executive Stale Person.",
+        browser="Wide Works is led by chief executive Browser Person."),
+    "https://zz-late.test/wide-profile": Page(
+        kind="news", published="2026-01-01T00:00:00+00:00",
+        served=("Wide Works is led by chief executive Late Page Person.")),
+}
+
+#: A company with more searchable pages than the 80-unit cap can render: the last pages by
+#: priority cannot be read, and the build must say so by simply not spending more.
+PAGES["huge-group.test"] = {
+    **_noise("huge-group.test", "huge-group.test", 2, "own"),
+    **_noise("huge-group.test", "wire.test", 23, "news"),
+    "https://zz-last.test/huge-profile": Page(
+        kind="news", served="Huge Group is led by chief executive Capped Person."),
+}
+
 #: domain -> research answer: (field, value, url, excerpt)
 RESEARCH = {
     ACME: [("founded_year", 2014, "https://companies-register.test/entity/acme",

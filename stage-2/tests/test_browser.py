@@ -188,7 +188,7 @@ def test_a_lost_research_response_is_uncertain_and_retryable(world, page):
     assert len(seen) >= 2
     assert seen[0] == seen[1], "the retry must send the same body and the same key"
     searches = [entry for entry in fakeweb.LOG if entry["method"] == "search"]
-    assert len(searches) == 7, "exactly one build ran"
+    assert len(searches) == 10, "exactly one build ran"
 
 
 def test_refresh_follows_the_build_without_a_manual_reload(world, page):
@@ -323,6 +323,60 @@ def test_a_refresh_beside_another_clients_build_follows_it_to_the_end(world, pag
     page.get_by_test_id("dossier-refresh").click()
     expect(page.get_by_test_id("dossier-state")).to_have_text("ready", timeout=30_000)
     expect(page.get_by_test_id("dossier-spent")).to_be_visible()
+
+
+def test_changing_the_domain_after_an_uncertain_request_uses_a_new_key(world, page):
+    """A lost response keeps its key for a retry of the same domain, not for a different one."""
+    sign_in(page)
+    page.goto("/")
+    seen = []
+
+    def lose_first(route):
+        seen.append({"key": route.request.headers.get("idempotency-key"),
+                     "body": route.request.post_data})
+        if len(seen) == 1:
+            route.fetch()
+            route.abort()
+        else:
+            route.continue_()
+
+    page.route("**/dossiers", lose_first)
+    page.get_by_test_id("research-domain").fill(ACME)
+    page.get_by_test_id("research-submit").click()
+    expect(page.get_by_test_id("research-uncertain")).to_be_visible()
+    page.get_by_test_id("research-domain").fill("rival-works.test")
+    page.get_by_test_id("research-submit").click()
+    page.wait_for_url("**/dossiers/rival-works.test")
+    expect(page.get_by_test_id("dossier-domain")).to_have_text("rival-works.test")
+    assert len(seen) >= 2
+    assert seen[0]["body"] != seen[1]["body"]
+    assert seen[0]["key"] and seen[1]["key"] and seen[0]["key"] != seen[1]["key"]
+    domains = {entry["domain"] for entry in world.get("/dossiers").json()["dossiers"]}
+    assert domains == {ACME, "rival-works.test"}
+
+
+def test_the_same_domain_after_an_uncertain_request_reuses_its_key(world, page):
+    """A retry of the same typed domain sends the identical key and body again."""
+    sign_in(page)
+    page.goto("/")
+    seen = []
+
+    def lose_first(route):
+        seen.append({"key": route.request.headers.get("idempotency-key"),
+                     "body": route.request.post_data})
+        if len(seen) == 1:
+            route.fetch()
+            route.abort()
+        else:
+            route.continue_()
+
+    page.route("**/dossiers", lose_first)
+    page.get_by_test_id("research-domain").fill(f"WWW.{ACME.upper()}")
+    page.get_by_test_id("research-submit").click()
+    expect(page.get_by_test_id("research-uncertain")).to_be_visible()
+    page.get_by_test_id("research-submit").click()
+    page.wait_for_url(f"**/dossiers/{ACME}")
+    assert len(seen) >= 2 and seen[0] == seen[1]
 
 
 def test_signing_out_returns_to_the_login_screen(world, page):

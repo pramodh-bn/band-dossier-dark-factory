@@ -357,9 +357,13 @@ function paintList(entries, query) {
 async function research(notes) {
   const input = document.getElementById("research-domain");
   const submit = document.querySelector("[data-testid=research-submit]");
-  const domain = normalizeDomain(input.value);
-  if (!pendingResearch) pendingResearch = {key: newKey(), body: {domain: input.value.trim()}};
-  pendingResearch.body = {domain: input.value.trim()};
+  const typed = input.value.trim();
+  const domain = normalizeDomain(typed);
+  // One key per intended request: retrying after a lost response reuses it, but a
+  // different typed domain is a different request and needs a key of its own.
+  if (!pendingResearch || pendingResearch.typed !== typed) {
+    pendingResearch = {typed: typed, key: newKey(), body: {domain: typed}};
+  }
   submit.disabled = true;
   notes.innerHTML = notice("research-loading", "Researching\\u2026", "info");
   let result;

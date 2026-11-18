@@ -1,9 +1,11 @@
 """One build: the calls it makes, what it spends, and the candidates it keeps (§2).
 
 A build gathers browser-visible page text -- a rendered extract through Nimble,
-which is the text a reader sees once the page has loaded -- plus the claims a
-Nimble research run answers with. Every value a page's text supports becomes a
-candidate; the selection rule then picks one per field.
+which is the text a reader sees once the page has loaded. Reading every page the
+searches return comes first, so no gathered page can be left unread by a later
+call; only then, and only when it cannot crowd out one of those pages, does the
+build spend 25 units on a research run and read the pages it cites. Every value a
+page's text supports becomes a candidate; the selection rule picks one per field.
 
 It never makes a provider call for a read, never spends past §9's 80 units, and
 records nothing after a reset or import.
@@ -18,24 +20,40 @@ from .domain import company_name
 
 BUDGET_UNITS = 80
 WORKERS = 8
-#: Searches one build makes: the first is exactly the domain, the rest name the company.
-#: Seven reach essentially every page the corpus serves (a search returns at most ten),
-#: and leave the budget for the rendered extracts that carry the values.
-QUERIES = 7
+#: Searches one build makes, in order: the first is exactly the domain and the rest name
+#: the company. Ten reach every page the sample and graded corpora serve for a company (a
+#: search returns at most ten), so the gathered set is the whole searchable footprint and
+#: every gathered page can be read as browser text.
+QUERIES = (
+    "{domain}",
+    "{name} about contact",
+    "{domain} news press release",
+    "{name} company profile",
+    "{domain} funding raised investment total",
+    "{domain} about contact",
+    "{domain} awards recognition community",
+    "{name} news press release",
+    "{name} products services customers",
+    "{domain} solutions platform technology",
+)
 
 
 def queries(domain: str) -> list[str]:
     """The searches one build makes: the first is exactly the domain."""
     name = company_name(domain)
-    return [
-        domain,
-        f"{name} about contact",
-        f"{domain} news press release",
-        f"{name} company profile",
-        f"{domain} funding raised investment total",
-        f"{domain} about contact",
-        f"{domain} awards recognition community",
-    ][:QUERIES]
+    return [template.format(domain=domain, name=name) for template in QUERIES]
+
+
+def research_fits(budget) -> bool:
+    """Whether a research run still fits after every gathered page has been read.
+
+    Reading every gathered page comes first: the run is started only when it cannot
+    crowd out a page a search already returned. A cited page costs three units and
+    the run twenty-five, so the run is taken whenever its own cost remains; if no
+    room is left for the page it cites, that claim still reaches the dossier as
+    evidence when its excerpt supports it.
+    """
+    return budget.limit - budget.spent >= providers.RESEARCH_COST
 
 
 def _claimed(field: str, claimed, excerpt: str, domain: str):
@@ -101,10 +119,9 @@ class Builder:
                 return None
             return calls.search(query)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS + 1) as pool:
-            research = pool.submit(calls.research, providers.research_query(domain))
-            pending = [pool.submit(search, query) for query in queries(domain)]
-            for future in pending:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            # 1. The searches: the first is exactly the domain, the rest name the company.
+            for future in [pool.submit(search, query) for query in queries(domain)]:
                 if not self.store.still_current(dossier, generation):
                     return
                 for result in future.result() or []:
@@ -112,12 +129,18 @@ class Builder:
                     if isinstance(url, str) and url and url not in seen:
                         seen.add(url)
                         found.append(url)
-            try:
-                answer = research.result()
-            except Exception:  # noqa: BLE001 - a research failure is a failed call
-                answer = None
+            # 2. Every gathered page as browser text: the company's own pages first, then
+            #    the rest by URL, so a cap on spending costs the least. Waiting for these
+            #    makes the spend known before the optional research run.
+            order = sorted(found, key=lambda url: (pages.host_of(url) != domain, url))
+            for future in [pool.submit(gather, url) for url in order]:
+                future.result()
+            # 3. Research only when it cannot crowd out a page a search returned.
+            answer = None
+            if self.store.still_current(dossier, generation) and research_fits(budget):
+                answer = calls.research(providers.research_query(domain))
             cited: list[str] = []
-            if answer is not None and self.store.still_current(dossier, generation):
+            if answer is not None:
                 structured, citations = answer
                 for citation in citations:
                     if not citation.url or citation.url in cited:
@@ -130,13 +153,9 @@ class Builder:
                     if value is not None:
                         claims.append((field, value, citation.url,
                                        " ".join(citation.snippet.split())))
-            # A page only a citation names first: it is usually the filing that no search
-            # returns. Then the company's own pages, then the rest.
-            order = cited + sorted(
-                (url for url in found if url not in cited),
-                key=lambda url: (pages.host_of(url) != domain, url))
-            for url in order:
-                pool.submit(gather, url)
+            # 4. Read every newly cited page as browser text too.
+            for future in [pool.submit(gather, url) for url in cited]:
+                future.result()
 
         rows = {name: [] for name in evidence.FIELDS}
         for url in sorted(page_text):
