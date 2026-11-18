@@ -128,3 +128,14 @@ gathered but never cited cannot be recovered from the export, and import makes n
 provider call (§10), so an imported field has candidates only for the citations
 it carries — it cannot be `contested` from evidence the export does not name. The
 next completed build is the point at which full evidence returns.
+
+**Known limitation — research and the 80-unit cap.** Ten searches and the
+rendered pages cost `10 + 3n` units. When a company has more than fifteen
+searchable pages that leaves fewer than the 25 units a research run costs, so the
+run is skipped rather than crowding out a page a search already returned: the
+build still reads every gathered page and keeps every candidate those pages
+support, but a field that only a non-searchable page (a filing, say) states stays
+`unknown` for that build. Every company with fifteen or fewer searchable pages
+gets the run and its cited pages. A company with more than twenty-three searchable
+pages exceeds what 80 units can render at all; no corpus set in this challenge
+has one.
