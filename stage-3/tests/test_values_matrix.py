@@ -4,9 +4,7 @@ A page version is what one ready build gathered from one URL: its candidates and
 `true_from`. A later version replaces earlier ones whose `true_from` is on or after its
 own, and the latest one it does not replace stops holding at its `true_from` — even when
 an already replaced version had ended it later. A version with a null `true_from` holds
-from no date and replaces every earlier one. A correction that lands inside the known
-timeline (older evidence survives before it, and it replaces a later-starting claim)
-answers for the span up to that replaced claim's start.
+from no date and replaces every earlier one.
 """
 from __future__ import annotations
 
@@ -99,16 +97,16 @@ def test_versions_from_one_build_keep_their_order():
 
 
 def test_a_correction_inside_the_timeline_moves_the_older_end():
-    """2024 A, 2026 B, then 2025 C: the older version now ends at 2025, not 2026."""
+    """2024 A, 2026 B, then 2025 C: the older version ends at 2025; C holds forward."""
     versions: list[dict] = []
     store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
     store._add_version(versions, {"true_from": "2026-01-01", "candidates": ["B"]})
     store._add_version(versions, {"true_from": "2025-01-01", "candidates": ["C"]})
     assert [v["candidates"] for v in holds(versions, "2024-06-01")] == [["A"]]
     assert [v["candidates"] for v in holds(versions, "2025-06-01")] == [["C"]]
-    assert holds(versions, "2026-06-01") == []
+    assert [v["candidates"] for v in holds(versions, "2026-06-01")] == [["C"]]
     assert versions[0]["end"] == "2025-01-01"
-    assert versions[2]["end"] == "2026-01-01"
+    assert versions[2]["end"] is None
 
 
 def test_a_correction_before_every_version_holds_forward():
@@ -145,16 +143,17 @@ def test_a_later_version_never_extends_an_earlier_end():
     assert [v["candidates"] for v in holds(versions, "2023-06-01")] == [["C"]]
 
 
-def test_an_empty_correction_inside_the_timeline_still_ends_the_older_one():
-    """An empty corrective version ends the older value where it starts and then stops."""
+def test_an_empty_correction_inside_the_timeline_holds_empty_forward():
+    """An empty corrective version ends the older value and then holds with no candidates."""
     versions: list[dict] = []
     store._add_version(versions, {"true_from": "2024-01-01", "candidates": ["A"]})
     store._add_version(versions, {"true_from": "2026-01-01", "candidates": ["B"]})
     store._add_version(versions, {"true_from": "2025-01-01", "candidates": []})
     assert [v["candidates"] for v in holds(versions, "2024-06-01")] == [["A"]]
-    assert holds(versions, "2025-06-01") == [{"start": "2025-01-01", "end": "2026-01-01",
+    assert holds(versions, "2025-06-01") == [{"start": "2025-01-01", "end": None,
                                               "dead": False, "candidates": []}]
-    assert holds(versions, "2026-06-01") == []
+    assert holds(versions, "2026-06-01") == [{"start": "2025-01-01", "end": None,
+                                              "dead": False, "candidates": []}]
 
 
 # -- through the API -------------------------------------------------------
@@ -211,7 +210,7 @@ def test_values_matrix_of_null_ended_and_replaced_versions(world):
         assert (field["value"], field["true_from"]) == (value, true_from), day
 
 
-def test_a_correction_inside_the_timeline_answers_up_to_the_replaced_claim(world):
+def test_an_empty_correction_inside_the_timeline_ends_the_older_value(world):
     """Builds at epochs 1, 5, 2: the empty correction ends Porto at 2026-02-15."""
     fakeweb.EPOCH = 1                            # Porto from 2026-02-01
     build(world)

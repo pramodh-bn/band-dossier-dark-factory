@@ -773,8 +773,6 @@ def _add_version(versions: list[dict], version: dict) -> None:
         versions.append({"start": None, "end": None, "dead": True,
                          "candidates": version["candidates"]})
         return
-    replaced = [old["start"] for old in versions
-                if old["start"] is not None and old["start"] >= start]
     for old in versions:
         if old["start"] is not None and old["start"] >= start:
             old["dead"] = True
@@ -787,15 +785,8 @@ def _add_version(versions: list[dict], version: dict) -> None:
         latest = survivors[-1]
         if latest["end"] is None or latest["end"] > start:
             latest["end"] = start
-    # A correction that lands inside the known timeline replaces a claim that starts
-    # later than its own; it answers for the span up to that claim, where the replaced
-    # evidence began, and not beyond it.
-    end = None
-    if survivors:
-        later = [old for old in replaced if old > start]
-        if later:
-            end = min(later)
-    versions.append({"start": start, "end": end, "dead": False,
+    # The new version holds from its own date forward, whatever it replaced.
+    versions.append({"start": start, "end": None, "dead": False,
                      "candidates": version["candidates"]})
 
 
