@@ -1088,8 +1088,22 @@ def migrated_field(name: str, value, researched_at) -> dict:
             kind=candidates_module.legacy_kind(value.get("kind")),
             published_at=candidates_module.legacy_published(value.get("published_at")))
     if name == "executives":
-        return candidates_module.executives_field(candidates)
-    return candidates_module.field(candidates)
+        derived = candidates_module.executives_field(candidates)
+    else:
+        derived = candidates_module.field(candidates)
+    if "learned_at" in value:
+        # A stage-3 export records when the *selection* was learned, which can be
+        # earlier than the selected candidate's first gather (a later, same-value
+        # candidate can win). It is state, not a function of the candidates, so keep it.
+        learned = value.get("learned_at")
+        if learned is not None:
+            try:
+                parse_time(learned)
+            except (TypeError, ValueError):
+                raise FixtureError(errors.validation(
+                    f"a state field {name} has a bad learned_at")) from None
+        derived["learned_at"] = learned
+    return derived
 
 
 def _validated_candidate(name: str, candidate) -> dict:

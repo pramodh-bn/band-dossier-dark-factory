@@ -10,7 +10,7 @@ import uuid
 import pytest
 
 import fakeweb
-from app import evidence, pages
+from app import evidence, pages, store
 from conftest import FIELDS, NOW, wait_ready
 
 ACME = "acme-robotics.test"
@@ -284,6 +284,48 @@ def test_executives_learned_at_follows_its_selection(world):
 def build_first_learned(world) -> str | None:
     """The executives field's learned_at in the dossier as it stands."""
     return world.get(f"/dossiers/{ACME}").json()["fields"]["executives"]["learned_at"]
+
+
+def test_a_restart_keeps_the_learned_at_of_the_selection(world, client):
+    """The selected time is state: a load does not recompute it from the winning candidate.
+
+    A later build can select a same-value candidate that was first gathered later; the
+    field's `learned_at` stays the build that selected the value, and must survive the
+    state round trip.
+    """
+    build(world)
+    move_on(world, epoch=1, now=MIDDLE)
+    refresh(world)
+    snapshot = client.get("/_test/export").json()
+    entry = next(d for d in snapshot["state"]["dossiers"] if d["domain"] == ACME)
+    entry["fields"]["ceo"]["learned_at"] = "2026-02-01T09:00:00+00:00"
+    history_before = world.get(f"/dossiers/{ACME}/history").json()
+    assert client.post("/_test/reset", json={"now": MIDDLE, "users": [
+        {"id": "u_a", "email": "a@example.com", "password": "correct horse",
+         "display_name": "A"}]}).status_code == 204
+    assert client.post("/_test/import", json=snapshot).status_code == 204
+    ceo = world.get(f"/dossiers/{ACME}").json()["fields"]["ceo"]
+    assert ceo["value"] == "Dana Ruiz"
+    assert ceo["learned_at"] == "2026-02-01T09:00:00+00:00"
+    assert world.get(f"/dossiers/{ACME}/history").json() == history_before
+
+
+def test_an_imported_executives_field_keeps_its_selected_learned_at():
+    """The same rule for the executives field: its stored selection time is preserved."""
+    candidate = {"value": "Ana Silva", "url": "https://acme-robotics.test/team",
+                 "excerpt": "Acme Robotics CFO: Ana Silva.", "provider": "own",
+                 "kind": "own", "published_at": "2026-03-01T00:00:00+00:00",
+                 "retrieved_at": LATER, "true_from": "2026-03-01", "learned_at": LATER,
+                 "title": "cfo"}
+    imported = store.migrated_field("executives", {
+        "value": [{"title": "cfo", "name": "Ana Silva"}], "status": "known",
+        "true_from": "2026-03-01", "learned_at": NOW, "citations": [],
+        "candidates": [candidate]}, LATER)
+    assert imported["value"] == [{"title": "cfo", "name": "Ana Silva"}]
+    assert imported["learned_at"] == NOW
+
+
+def test_executives_history_and_feed_are_typed_by_title(world):
     """A later build that moves a title records the array and a per-title type."""
     build(world)
     move_on(world, epoch=4)                     # the CFO changes
