@@ -1,0 +1,5 @@
+# Runtime dependencies (§2). Every provider call goes through WebRouter, in this
+# process; the three extras install the nimble SDK that serves search, extract
+# and research. 0.13.0 is what this revision was tested against; the floor is the
+# spec's, and the cap keeps a future major from changing the API under us.
+webrouter[search,extract,research]>=0.12.0,<0.14.0
