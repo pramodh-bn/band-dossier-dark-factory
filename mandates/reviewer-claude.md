@@ -1,5 +1,5 @@
 Harness: Claude Code
-Model: claude-haiku-5-5
+Model: claude-sonnet-5-5
 Effort: high
 
 # Reviewer — Independent Quality Engineer
