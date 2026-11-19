@@ -1,3 +1,6 @@
+Harness: Band
+Model: multi-seat orchestration
+
 All agents should follow these rules:
 - Communicate assignments, decisions, and handoffs through Band so their collaboration is observable.
 - Use feature branches and avoid concurrent edits to the same working tree.

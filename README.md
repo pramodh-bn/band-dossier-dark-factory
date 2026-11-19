@@ -1,34 +1,37 @@
 # Dossier — scored result
 
-The Dossier buildathon submission. Each stage lives in its own folder and is a
-complete, independently buildable service; `stage-1/` is the company-profile
-service this repository currently holds.
+The Dossier buildathon submission from a three-seat Band factory. Each stage is
+a complete, independently buildable service frozen at its independently
+approved revision. Stage 4 is the highest completed service.
 
-```
-stage-1/            the stage 1 service, its Dockerfile, RUN.md and tests
-stage-1/app/        the service
-stage-1/tests/      unit and HTTP tests, plus the Appendix A corpus-key check
+```text
+stage-1/ … stage-4/  complete service at each specification stage
+mandates/            reusable Lead, Implementer and Reviewer operating rules
+FACTORY.md           factory design, evidence, costs and failure recovery
+room.json            immutable full Band session export
+dossier-runway.com.json
+                     live-web runway.com result from Stage 4
 ```
 
-## Running stage 1
+## Running the completed service
 
 ```sh
-cd stage-1
-docker build -t dossier-stage1 .
-docker run --rm -p 8080:8080 -e PORT=8080 -e NIMBLE_API_KEY="<key>" dossier-stage1
+cd stage-4
+docker build -t dossier-stage4 .
+docker run --rm -p 8080:8080 -e PORT=8080 -e NIMBLE_API_KEY="<key>" dossier-stage4
 ```
 
-See `stage-1/RUN.md` for the API walkthrough, the layout and the tests.
+See each stage's `RUN.md` for its API walkthrough, design and tests.
 
 ## Checking it against the official harness
 
-From the organizers' tree (`sf-buildathon-2026`), with the mock web the harness
-starts beside the service:
+From the organizers' tree (`sf-buildathon-2026`):
 
 ```sh
-python -m harness run --track dossier --repo <this repository> --stage 1 --mode isolated
+python -m harness check --track dossier <this repository>
+python -m harness run --track dossier --repo <this repository> --stage 4 --mode isolated
+python -m harness run --track dossier --repo <this repository> --all --mode isolated
 ```
 
 `--mode isolated` is the grading mode: the service runs on an internal network
-with no route out, and every provider call it makes goes to the mock web through
-WebRouter.
+with no route out, and provider calls go to the mock web through WebRouter.
