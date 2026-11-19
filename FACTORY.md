@@ -216,3 +216,34 @@ The most important result was not raw code generation. It was a **repeatable eng
 
 The evidence also identifies the limits of the experiment: test coverage is finite, some heuristics have known edge cases, and the transcript does not independently verify the BAND-reported $46.78 or break it down by agent. Within those boundaries, the final approved service and the documented rejections show a factory that **repaired specification-level failures rather than merely optimizing for visible test success**.
 
+### Final submission-repository verification — November 19, 2026
+
+After the autonomous factory completed its four stages, the final submission repository was independently checked using the organizer's shipped harness in WSL2/Docker isolated mode.
+
+**Repository:** `pramodh-bn/band-dossier-dark-factory`
+
+**Command:**
+```bash
+python -m harness run \
+  --track dossier \
+  --repo /mnt/d/Workspace/band-dossier-dark-factory \
+  --all \
+  --mode isolated
+```
+
+**Results:**
+
+| Folder | Highest contiguous stage | Claimed stage | Outcome |
+|---|---:|---:|---|
+| `stage-1/` | 1 | 1 | Pass |
+| `stage-2/` | 2 | 2 | Pass |
+| `stage-3/` | 3 | 3 | Pass |
+| `stage-4/` | 4 | 4 | Pass |
+
+All four stage folders built and passed their respective shipped checks, including the applicable upgrade-source checks.
+
+**Run identifier:** `e7d13e8e020b409c9f6ac9cf39a04291`
+
+**Evidence:** `runs/e7d13e8e020b409c9f6ac9cf39a04291/summary.json`
+
+**Verification boundary:** The organizer explicitly notes that the shipped harness covers only a portion of the tests used during judging. These results establish successful submission-level validation against the available checks, not a guarantee of passing all private judging tests.
