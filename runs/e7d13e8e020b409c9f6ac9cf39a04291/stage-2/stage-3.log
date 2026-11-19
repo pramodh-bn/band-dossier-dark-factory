@@ -1,0 +1,40 @@
+$ docker run --rm --network df-run-8cf994d2460b4e10a63dd17cadf98817 -v /mnt/d/Workspace/dark-factory-buildathon/sf-buildathon-2026:/work:ro -v /mnt/d/Workspace/dark-factory-buildathon/sf-buildathon-2026/runs/e7d13e8e020b409c9f6ac9cf39a04291/stage-2:/out -e PYTHONDONTWRITEBYTECODE=1 -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 -e COLUMNS=200 -w /work df-harness-runner python -m pytest challenges/dossier/test/stage_3 --base-url http://df-svc-00acb5586245:8080 -p harness.plugin --rootdir challenges/dossier/test -q --web-url http://df-web-69a5730f8372:8080 --web-admin-token *** --web-corpus challenges/dossier/web/corpus/sample --control-dir /out/control -x --previous-base-url http://df-svc-00acb5586245:8080 --implementation-stage 3 --harness-summary /out/stage-3.counts.json
+
+F
+=============================================================================================== FAILURES ===============================================================================================
+_______________________________________________________________________________ test_first_build_writes_initial_history ________________________________________________________________________________
+
+world = namespace(fixture={'now': '2026-03-01T09:00:00+00:00', 'users': [{'id': 'u_alice', 'email': 'alice@example.com', 'pass...ay_name': 'Bob'}]}, alice=<harness.http.Api object at 0x7862a12cf920>, bob=<harness.http.Api object at 0x7862a1323f50>)
+build = <function build.<locals>._build at 0x7862a11ea700>
+plain = ['ashgrove-solar.test', 'corvid-security.test', 'halvorsen-robotics.test', 'mosaic-freight.test', 'pemberton-analytics.test', 'windrush-bakery.test']
+
+>   ???
+
+D:\Workspace\dark-factory-buildathon\sf-buildathon-2026\challenges\dossier\test\stage_3\test_sample.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+resp = <Response [404 Not Found]>, expected = 200
+
+    def assert_status(resp: httpx.Response, expected: int) -> httpx.Response:
+        """Assert the response status, reporting the request and body on failure."""
+>       assert resp.status_code == expected, \
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            f"expected {expected}, got {resp.status_code}. {_describe(resp)}"
+E       AssertionError: expected 200, got 404. GET /dossiers/ashgrove-solar.test/history -> 404 '{"error": {"code": "not_found", "message": "no such endpoint"}}'
+
+harness/http.py:116: AssertionError
+=========================================================================================== warnings summary ===========================================================================================
+../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:469
+  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:469: PytestCacheWarning: cache could not write path /work/challenges/dossier/test/.pytest_cache/v/cache/nodeids: [Errno 30] Read-only file system: '/work/challenges/dossier/test/.pytest_cache/v/cache/nodeids'
+    config.cache.set("cache/nodeids", sorted(self.cached_nodeids))
+
+../usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:423
+  /usr/local/lib/python3.12/site-packages/_pytest/cacheprovider.py:423: PytestCacheWarning: cache could not write path /work/challenges/dossier/test/.pytest_cache/v/cache/lastfailed: [Errno 30] Read-only file system: '/work/challenges/dossier/test/.pytest_cache/v/cache/lastfailed'
+    config.cache.set("cache/lastfailed", self.lastfailed)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================================================================================= short test summary info ========================================================================================
+FAILED challenges/dossier/test/stage_3/test_sample.py::test_first_build_writes_initial_history - AssertionError: expected 200, got 404. GET /dossiers/ashgrove-solar.test/history -> 404 '{"error": {...
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 2 warnings in 1.03s
+
