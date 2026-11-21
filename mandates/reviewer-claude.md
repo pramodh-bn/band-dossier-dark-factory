@@ -1,6 +1,6 @@
 Harness: Claude Code
 Model: claude-sonnet-5-5
-Effort: high
+Effort: medium
 
 # Reviewer — Independent Quality Engineer
 

@@ -27,7 +27,7 @@ The BAND-reported total is a factory-run cost figure, **not** a verified sum of 
 |---|---|---|---|
 | Lead | `@pramodh.nanjayya/lead-codex-1` (Codex; `gpt-5.6-sol`, medium) | Interpret current stage, define acceptance criteria, assign work, reconcile evidence, enforce stage boundaries | Authorize advancement only after independent approval and a clean committed revision |
 | Implementer | `@pramodh.nanjayya/implementer-opencode` (OpenCode; `deepseek/deepseek-flash-latest`, high) | Implement complete stage, tests, Dockerfile and `RUN.md`; execute harness; fix defects; commit | Change the active stage only; supply reproducible evidence |
-| Reviewer | `@pramodh.nanjayya/reviewer-claude` (Claude; `claude-sonnet-5-5`, high; Band’s model mix for this seat shows Sonnet $28.36 and a small Haiku share of $0.14, so the seat was switched from Haiku to Sonnet during the run) | Independently inspect code, run isolated harness and adversarial tests, reproduce failures | Approve or request changes; do not edit implementation |
+| Reviewer | `@pramodh.nanjayya/reviewer-claude` (Claude; `claude-sonnet-5-5`, medium; Band’s model mix for this seat shows Sonnet $28.36 and a small Haiku share of $0.14, so the seat was switched from Haiku to Sonnet during the run) | Independently inspect code, run isolated harness and adversarial tests, reproduce failures | Approve or request changes; do not edit implementation |
 
 The user's opening mandate, sent **2026-11-17 20:47:57 UTC**, required:
 
