@@ -35,3 +35,7 @@ python -m harness run --track dossier --repo <this repository> --all --mode isol
 
 `--mode isolated` is the grading mode: the service runs on an internal network
 with no route out, and provider calls go to the mock web through WebRouter.
+
+## Presentation
+[YouTube](https://youtu.be/I9qdLDhrcQE)
+[Dossier Factory Room Replay](https://claude.ai/artifact/T91Dywbz189UgH4gvxKPKZ)
